@@ -5,6 +5,7 @@ Repository containing Agent Skills compatible with [GitHub CLI Agent Skills (`gh
 ## Available Skills
 
 - `skills/asllm-nerdctl`: Run and manage LLM inference servers (vLLM / SGLang) using `nerdctl` and `asllm` images on Alibaba 890P (AliXPU) hardware.
+- `skills/guidellm-benchmark`: Run GuideLLM load benchmarks across all profiles in nerdctl/docker containers and generate environment reports.
 - `skills/example-skill`: Template demonstrating standard skill layout and frontmatter.
 
 ## Authoring and Modifying Skills

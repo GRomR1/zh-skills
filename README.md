@@ -27,6 +27,7 @@ zh-skills/
 | Skill | Description |
 |---|---|
 | [`asllm-nerdctl`](skills/asllm-nerdctl/SKILL.md) | Deploy, manage, and query LLM models in nerdctl containers using asllm images on Alibaba 890P (AliXPU) hardware. |
+| [`guidellm-benchmark`](skills/guidellm-benchmark/SKILL.md) | Run GuideLLM load benchmarks across all profiles in nerdctl/docker containers and generate environment reports. |
 | [`example-skill`](skills/example-skill/SKILL.md) | A template skill demonstrating the Agent Skills directory structure and conventions. |
 
 ---
