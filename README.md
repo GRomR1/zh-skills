@@ -26,6 +26,7 @@ zh-skills/
 
 | Skill | Description |
 |---|---|
+| [`asllm-nerdctl`](skills/asllm-nerdctl/SKILL.md) | Deploy, manage, and query LLM models in nerdctl containers using asllm images on Alibaba 890P (AliXPU) hardware. |
 | [`example-skill`](skills/example-skill/SKILL.md) | A template skill demonstrating the Agent Skills directory structure and conventions. |
 
 ---

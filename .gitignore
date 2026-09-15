@@ -13,6 +13,7 @@ Thumbs.db
 .claude/
 
 # Temporary and runtime files
+tmp/
 *.log
 *.tmp
 __pycache__/
