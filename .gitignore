@@ -1,0 +1,22 @@
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Agent installation directories and cache (installed skills during testing)
+.agents/
+.claude/
+
+# Temporary and runtime files
+*.log
+*.tmp
+__pycache__/
+*.py[cod]
+node_modules/
+.env
+.env.*
