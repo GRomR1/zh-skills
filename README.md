@@ -29,7 +29,6 @@ zh-skills/
 | [`asllm-nerdctl`](skills/asllm-nerdctl/SKILL.md) | Deploy, manage, and query LLM models in nerdctl containers using asllm images on Alibaba 890P (AliXPU) hardware. |
 | [`modelscope-download`](skills/modelscope-download/SKILL.md) | Download open-source LLM weights from ModelScope using modelscope CLI inside an asllm container with proxy support. |
 | [`guidellm-benchmark`](skills/guidellm-benchmark/SKILL.md) | Run GuideLLM load benchmarks across all profiles in nerdctl/docker containers and generate environment reports. |
-| [`example-skill`](skills/example-skill/SKILL.md) | A template skill demonstrating the Agent Skills directory structure and conventions. |
 
 ---
 
@@ -45,18 +44,17 @@ gh --version
 
 #### From a remote GitHub repository
 
-```bash
 # Install a specific skill for GitHub Copilot (default)
-gh skill install <owner>/zh-skills example-skill
+gh skill install GRomR1/zh-skills asllm-nerdctl
 
 # Install for a specific agent (e.g. claude-code, cursor, codex, gemini-cli)
-gh skill install <owner>/zh-skills example-skill --agent claude-code
+gh skill install GRomR1/zh-skills asllm-nerdctl --agent claude-code
 
 # Install at user scope (available across all projects in ~/.claude/skills or ~/.agents/skills)
-gh skill install <owner>/zh-skills example-skill --agent claude-code --scope user
+gh skill install GRomR1/zh-skills asllm-nerdctl --agent claude-code --scope user
 
 # Install all skills from the repository
-gh skill install <owner>/zh-skills --all
+gh skill install GRomR1/zh-skills --all
 ```
 
 #### From a local directory (development / testing)
@@ -66,7 +64,7 @@ gh skill install <owner>/zh-skills --all
 gh skill install . --from-local
 
 # Install a specific skill from the current directory
-gh skill install . example-skill --from-local --agent github-copilot
+gh skill install . asllm-nerdctl --from-local --agent github-copilot
 
 # Install all skills from local directory
 gh skill install . --all --from-local
@@ -76,8 +74,7 @@ gh skill install . --all --from-local
 
 Preview a skill's file tree and rendered `SKILL.md` directly in the terminal without installing:
 
-```bash
-gh skill preview <owner>/zh-skills example-skill
+gh skill preview GRomR1/zh-skills asllm-nerdctl
 ```
 
 ### 3. List Installed Skills
@@ -93,7 +90,7 @@ gh skill list
 gh skill update --all
 
 # Update a specific skill
-gh skill update example-skill
+gh skill update asllm-nerdctl
 ```
 
 ---
