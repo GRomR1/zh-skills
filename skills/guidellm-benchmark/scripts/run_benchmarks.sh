@@ -11,8 +11,9 @@ ENDPOINT="http://localhost:8000"
 CONTAINER_NAME=""
 RUNTIME=""
 MAX_DURATION="60"
-PROMPT_TOKENS="256"
-OUTPUT_TOKENS="128"
+PRESET="8k-1k"
+PROMPT_TOKENS="8192"
+OUTPUT_TOKENS="1024"
 GUIDELLM_IMAGE="ghcr.io/vllm-project/guidellm:latest"
 DRY_RUN=false
 
@@ -25,8 +26,9 @@ Options:
   -c, --container NAME        Name or ID of serving container (vLLM/SGLang) to inspect
   -r, --runtime RUNTIME       Container runtime: docker or nerdctl (default: auto-detect)
   -d, --duration SECONDS      Max duration constraint per profile strategy in seconds (default: 60)
-  -p, --prompt-tokens NUM     Synthetic prompt token count (default: 256)
-  -o, --output-tokens NUM     Synthetic output token count (default: 128)
+  --preset PRESET             Token preset: 8k-1k (default), chat (2k->512), reasoning (4k->2k), quick (256->128)
+  -p, --prompt-tokens NUM     Synthetic prompt token count (default: 8192)
+  -o, --output-tokens NUM     Synthetic output token count (default: 1024)
   -i, --image IMAGE           GuideLLM container image (default: ghcr.io/vllm-project/guidellm:latest)
   --dry-run                   Print commands without executing
   -h, --help                  Show this help message
@@ -51,6 +53,31 @@ while [[ $# -gt 0 ]]; do
       ;;
     -d|--duration)
       MAX_DURATION="$2"
+      shift 2
+      ;;
+    --preset)
+      PRESET="$2"
+      case "$PRESET" in
+        8k-1k|rag|standard)
+          PROMPT_TOKENS="8192"
+          OUTPUT_TOKENS="1024"
+          ;;
+        chat)
+          PROMPT_TOKENS="2048"
+          OUTPUT_TOKENS="512"
+          ;;
+        reasoning)
+          PROMPT_TOKENS="4096"
+          OUTPUT_TOKENS="2048"
+          ;;
+        quick|smoke)
+          PROMPT_TOKENS="256"
+          OUTPUT_TOKENS="128"
+          ;;
+        *)
+          echo "Warning: Unknown preset '$PRESET'. Keeping current values."
+          ;;
+      esac
       shift 2
       ;;
     -p|--prompt-tokens)

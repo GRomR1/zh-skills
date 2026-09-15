@@ -123,3 +123,16 @@ Constraints govern when each strategy stops:
 | `max_duration` | `--constraint kind=max_duration,seconds=60` | Stop strategy after N elapsed seconds. |
 | `max_requests` | `--constraint kind=max_requests,count=500` | Stop strategy after N requests are processed. |
 | `over_saturation` | `--constraint kind=over_saturation,min_seconds=30` | Auto-abort if server latency explodes due to saturation. |
+
+---
+
+## Workload Token Sizing (Prompt vs Output)
+
+Selecting realistic prompt and output token lengths is critical for representative benchmarking. The historical toy default of 256/128 tokens severely under-tests prefill attention mechanisms and KV cache allocation:
+
+| Workload Preset | Prompt Tokens | Output Tokens | Rationale |
+|---|---|---|---|
+| **Standard / RAG (Default)** | **8,192** | **1,024** | Represents production RAG, document analysis, and coding agent prompts. Exercises chunked prefill, TTFT under load, and high KV-cache memory pressure. |
+| **Conversational Chat** | **2,048** | **512** | Typical multi-turn user conversation with moderate context history. |
+| **Reasoning / Chain-of-Thought** | **4,096** | **2,048** | Models with extended reasoning chains (o1/DeepSeek-R1 style) generating detailed output tokens. |
+| **Smoke / Quick Test** | **256** | **128** | Lightweight sanity check for container networking and API connectivity. |

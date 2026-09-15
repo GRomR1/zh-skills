@@ -32,11 +32,31 @@ bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
   --runtime nerdctl \
   --duration 60
 
+# Run with workload presets:
+#   8k-1k (default RAG/Agentic: 8192 prompt -> 1024 output)
+#   chat (Conversational: 2048 prompt -> 512 output)
+#   reasoning (Deep reasoning: 4096 prompt -> 2048 output)
+#   quick (Smoke test: 256 prompt -> 128 output)
+bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
+  --endpoint http://localhost:8000 \
+  --preset chat
+
 # Dry-run to preview commands without executing
 bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
   --endpoint http://localhost:8000 \
   --dry-run
 ```
+
+### Workload Sizing & Presets
+
+Realistic modern benchmarks in 2026 reflect agentic, RAG, and multi-turn workflows where prompt tokens dominate:
+
+| Preset | Prompt Tokens | Output Tokens | Use Case |
+|---|---|---|---|
+| `8k-1k` *(default)* | 8,192 | 1,024 | Standard RAG, document Q&A, and agentic workflows |
+| `chat` | 2,048 | 512 | Conversational chat with short history |
+| `reasoning` | 4,096 | 2,048 | Long-form thinking / reasoning models |
+| `quick` | 256 | 128 | Smoke testing container and network connectivity |
 
 ---
 
@@ -86,7 +106,7 @@ $RUNTIME run --rm --network host \
   ghcr.io/vllm-project/guidellm:latest \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
-  --data kind=synthetic_text,prompt_tokens=256,output_tokens=128 \
+  --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
   --constraint kind=max_duration,seconds=60 \
   --profile kind=synchronous \
   --output kind=csv,path=/results/benchmarks.csv \
@@ -102,7 +122,7 @@ $RUNTIME run --rm --network host \
   ghcr.io/vllm-project/guidellm:latest \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
-  --data kind=synthetic_text,prompt_tokens=256,output_tokens=128 \
+  --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
   --constraint kind=max_duration,seconds=60 \
   --profile kind=throughput,max_concurrency=32,rampup_duration=10 \
   --output kind=csv,path=/results/benchmarks.csv \
@@ -118,7 +138,7 @@ $RUNTIME run --rm --network host \
   ghcr.io/vllm-project/guidellm:latest \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
-  --data kind=synthetic_text,prompt_tokens=256,output_tokens=128 \
+  --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
   --constraint kind=max_duration,seconds=60 \
   --profile kind=concurrent,streams=16,rampup_duration=10 \
   --output kind=csv,path=/results/benchmarks.csv \
@@ -134,7 +154,7 @@ $RUNTIME run --rm --network host \
   ghcr.io/vllm-project/guidellm:latest \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
-  --data kind=synthetic_text,prompt_tokens=256,output_tokens=128 \
+  --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
   --constraint kind=max_duration,seconds=60 \
   --profile kind=constant,rate=10,rampup_duration=10 \
   --output kind=csv,path=/results/benchmarks.csv \
@@ -150,7 +170,7 @@ $RUNTIME run --rm --network host \
   ghcr.io/vllm-project/guidellm:latest \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
-  --data kind=synthetic_text,prompt_tokens=256,output_tokens=128 \
+  --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
   --constraint kind=max_duration,seconds=60 \
   --profile kind=poisson,rate=10 --seed kind=static,value=42 \
   --output kind=csv,path=/results/benchmarks.csv \
@@ -166,7 +186,7 @@ $RUNTIME run --rm --network host \
   ghcr.io/vllm-project/guidellm:latest \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
-  --data kind=synthetic_text,prompt_tokens=256,output_tokens=128 \
+  --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
   --constraint kind=max_duration,seconds=60 \
   --profile kind=sweep,sweep_size=6,rampup_duration=10 \
   --output kind=csv,path=/results/benchmarks.csv \
