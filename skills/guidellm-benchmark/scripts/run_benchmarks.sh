@@ -158,6 +158,7 @@ echo "============================================================"
 
 if [[ "$DRY_RUN" = false ]]; then
   mkdir -p "${TARGET_DIR}/profiles"
+  chmod 777 "${TARGET_DIR}" "${TARGET_DIR}/profiles" 2>/dev/null || true
 fi
 
 # 1. Inspect target model endpoint
@@ -267,9 +268,8 @@ for profile in "${PROFILES[@]}"; do
   PROFILE_DIR="${TARGET_DIR}/profiles/${profile}"
   if [[ "$DRY_RUN" = false ]]; then
     mkdir -p "${PROFILE_DIR}"
+    chmod 777 "${PROFILE_DIR}" 2>/dev/null || true
   fi
-
-  PROFILE_ARGS="${PROFILE_CONFIGS[$profile]}"
 
   # Offline tokenizer configuration if local model path exists
   EXTRA_VOLUMES=()

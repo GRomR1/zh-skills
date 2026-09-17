@@ -314,17 +314,44 @@ bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
 *(Note: `run_benchmarks.sh` will also automatically detect the host model path from the container inspect JSON if `--container` is provided!)*
 
 ---
+### 2. Volume Permissions (`PermissionError: [Errno 13] Permission denied: '/results/benchmarks.json'`)
 
-### 2. Container Subcommand
+**Symptom**:
+```
+PermissionError: [Errno 13] Permission denied: '/results/benchmarks.json'
+time="..." level=error msg="forward signal child exited" error="ttrpc: closed: unknown"
+```
+
+**Root Cause**:
+The GuideLLM container runs as unprivileged user `USER 1001:0`. When output directories on the host are created by `root` (or with default `umask 0755`), user `1001` has no write access inside the mounted `/results` volume.
+
+**Fixes Before Container Launch**:
+1. **World-writable directories (Recommended & built into `run_benchmarks.sh`)**:
+   ```bash
+   mkdir -p "${PROFILE_DIR}"
+   chmod 777 "${PROFILE_DIR}"
+   ```
+2. **Run container as root (`--user 0`)**:
+   ```bash
+   nerdctl run --rm --network host --user 0 -v "${PROFILE_DIR}:/results:rw" ...
+   ```
+3. **Match container UID/GID (`chown`)**:
+   ```bash
+   chown -R 1001:0 "${TARGET_DIR}"
+   ```
+
+---
+
+### 3. Container Subcommand
 Always pass `run` after `ghcr.io/vllm-project/guidellm:latest`. The image entrypoint is `/opt/app-root/bin/guidellm`; passing flags directly replaces the container command and causes command parse errors.
 
-### 3. Network Mode
+### 4. Network Mode
 Always specify `--network host` so the GuideLLM container can access services running on host loopback (`http://localhost:8000`).
 
-### 4. Output Formats
+### 5. Output Formats
 Specify `--output` repeatedly for each required format (`csv`, `json`, `html`, `plot`). For PNG charts, use `--output kind=plot,path=/results/benchmarks.png`.
 
-### 5. Preserving LLM Context
+### 6. Preserving LLM Context
 When reporting completion to the user, present the summary of the environment and the paths to `REPORT.md` and the artifact files. Do not dump CSV rows or benchmark numbers into the chat.
 ---
 
