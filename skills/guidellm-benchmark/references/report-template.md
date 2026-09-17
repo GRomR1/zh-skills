@@ -36,7 +36,34 @@ This reference details the structure and composition of the benchmark report gen
 - **Resolved Model ID**: `<model_id>`
 - **Endpoint URL**: `http://<host>:<port>`
 - **Model Info JSON**: [`model_info.json`](model_info.json)
+- **Model Launch Configuration**: [`launch_config.json`](launch_config.json)
 
+### Model Launch Configuration (`launch_config.json`)
+
+A clean, machine-readable JSON snapshot of the serving model configuration, GPU allocations, and runtime parameters:
+
+```json
+{
+  "model": "/models/Qwen3.8-27B-FP8",
+  "served_model_name": "qwen-27b",
+  "port": 8000,
+  "kv_cache_dtype": "fp8",
+  "tensor_parallel_size": 1,
+  "distributed_executor_backend": "mp",
+  "trust_remote_code": true,
+  "gpu_memory_utilization": 0.90,
+  "max_model_len": 32768,
+  "max_num_seqs": 256,
+  "enable_chunked_prefill": true,
+  "no_enable_prefix_caching": true,
+  "devices": ["/dev/alixpu", "/dev/alixpu_ctl", "/dev/alixpu_ppu2"],
+  "ppu_assignment": "ppu2",
+  "shm_size": "128g",
+  "container_image": "asllm:2.0.0-pytorch2.10.0-ubuntu24.04-sail2.1.0-cuda13.0-sglang0.5.13-vllm0.23.0-py312",
+  "container_name": "qwen27b-fp8-tp1",
+  "runtime": "nerdctl"
+}
+```
 ### Container Configuration (from `<runtime> inspect`)
 - **Serving Image**: `<serving_image_tag>`
 - **Container Command / Arguments**:

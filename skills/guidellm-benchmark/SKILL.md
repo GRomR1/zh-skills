@@ -35,6 +35,19 @@ bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
 bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
   --endpoint http://localhost:8000 \
   --preset quick
+
+# Run specific profile (default is sweep; options: sweep, concurrent, synchronous, throughput, constant, poisson, all)
+bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
+  --endpoint http://localhost:8000 \
+  --container <serving_container_name_or_id> \
+  --profile sweep
+
+# Bundle an explicit model launch configuration
+bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
+  --endpoint http://localhost:8000 \
+  --container <serving_container_name_or_id> \
+  --launch-config ./launch_config.json
+
 # Run with workload presets:
 #   8k-1k (default RAG/Agentic: 8192 prompt -> 1024 output)
 #   chat (Conversational: 2048 prompt -> 512 output)
@@ -112,8 +125,31 @@ MODEL_ID=$(jq -r '.data[0].id' "${RUN_DIR}/model_info.json")
 RUNTIME="nerdctl" # or docker
 CONTAINER="<serving_container_name>"
 $RUNTIME inspect "$CONTAINER" > "${RUN_DIR}/serving_container_inspect.json"
-```
 
+# Save structured model launch configuration (launch_config.json)
+cat > "${RUN_DIR}/launch_config.json" << 'EOF'
+{
+  "model": "/models/Qwen3.8-27B-FP8",
+  "served_model_name": "qwen-27b",
+  "port": 8000,
+  "kv_cache_dtype": "fp8",
+  "tensor_parallel_size": 1,
+  "distributed_executor_backend": "mp",
+  "trust_remote_code": true,
+  "gpu_memory_utilization": 0.90,
+  "max_model_len": 32768,
+  "max_num_seqs": 256,
+  "enable_chunked_prefill": true,
+  "no_enable_prefix_caching": true,
+  "devices": ["/dev/alixpu", "/dev/alixpu_ctl", "/dev/alixpu_ppu2"],
+  "ppu_assignment": "ppu2",
+  "shm_size": "128g",
+  "container_image": "asllm:2.0.0-pytorch2.10.0-ubuntu24.04-sail2.1.0-cuda13.0-sglang0.5.13-vllm0.23.0-py312",
+  "container_name": "qwen27b-fp8-tp1",
+  "runtime": "nerdctl"
+}
+EOF
+```
 Extract key attributes for the report:
 - Container image tag
 - Command arguments (e.g. `--model`, `--tensor-parallel-size`, `--gpu-memory-utilization`, `--max-model-len`, `--dtype`)
