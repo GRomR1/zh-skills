@@ -25,13 +25,16 @@ Run comprehensive load and performance benchmarks against OpenAI-compatible LLM 
 Use the bundled orchestrator script in `scripts/run_benchmarks.sh`:
 
 ```bash
-# Basic run against local server on port 8000
+# Basic run against local server on port 8000 (standard 8k->1k, 180s duration)
 bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
   --endpoint http://localhost:8000 \
   --container <serving_container_name_or_id> \
-  --runtime nerdctl \
-  --duration 60
+  --runtime nerdctl
 
+# Fast smoke test (60s duration, 256->128 tokens)
+bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
+  --endpoint http://localhost:8000 \
+  --preset quick
 # Run with workload presets:
 #   8k-1k (default RAG/Agentic: 8192 prompt -> 1024 output)
 #   chat (Conversational: 2048 prompt -> 512 output)
@@ -51,13 +54,35 @@ bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
 
 Realistic modern benchmarks in 2026 reflect agentic, RAG, and multi-turn workflows where prompt tokens dominate:
 
-| Preset | Prompt Tokens | Output Tokens | Use Case |
-|---|---|---|---|
-| `8k-1k` *(default)* | 8,192 | 1,024 | Standard RAG, document Q&A, and agentic workflows |
-| `chat` | 2,048 | 512 | Conversational chat with short history |
-| `reasoning` | 4,096 | 2,048 | Long-form thinking / reasoning models |
-| `quick` | 256 | 128 | Smoke testing container and network connectivity |
+| Preset | Prompt Tokens | Output Tokens | Default Duration | Use Case |
+|---|---|---|---|---|
+| `8k-1k` *(default)* | 8,192 | 1,024 | 180s | Standard production RAG and agentic workflows |
+| `chat` | 2,048 | 512 | 120s | Conversational chat with moderate history |
+| `reasoning` | 4,096 | 2,048 | 240s | Extended reasoning / Chain-of-Thought models |
+| `quick` | 256 | 128 | 60s | Smoke testing container, network, and endpoint connectivity |
 
+### Duration & Statistical Validity Guidelines
+
+Choosing an adequate benchmark duration (`--duration` / `max_duration`) is essential for statistical convergence:
+
+1. **Generation Latency Physics**:
+   - For a 27B model on 1–2 PPUs, decode throughput is typically **25–40 tokens/sec** per stream.
+   - Generating **1,024 output tokens** requires **~25–40 seconds** per individual request.
+   - GuideLLM applies an initial 10-second concurrency ramp-up (`rampup_duration=10`).
+
+2. **Why 60 seconds is insufficient for 8k $\to$ 1k**:
+   - In 60 seconds, each parallel stream can complete **only 1 or at most 2 requests**.
+   - In the sequential `synchronous` profile, exactly **one** request completes before the deadline ($N=1$).
+   - Percentiles (P50, P90, P99), latency jitter, and steady-state throughput cannot be accurately computed from 1–2 samples.
+
+3. **Recommended Duration Guidelines**:
+   - **Smoke Test (`--duration 60` or `--preset quick`)**: Verifies container launch, GPU memory stability, absence of OOM, and report generation.
+   - **Statistically Valid Benchmark (`--duration 180` to `300`)**: Standard for 8k $\to$ 1k. Allows 6–10 completed requests per stream, stable KV-cache warmup, and tight latency percentiles.
+   - **Fast Alternative (`--preset chat` or `-o 256 -d 90`)**: Reduces decode time to 8–12 seconds per request, providing high sample counts in 90–120 seconds.
+
+4. **Time Budgeting for the `sweep` Profile**:
+   - GuideLLM's `sweep` profile executes 6 sub-strategies in sequence (baseline sync + peak throughput + 4 interpolated rate steps).
+   - The `max_duration` applies **per sub-strategy**. Total execution time for `sweep` alone is $\approx 6 \times \text{duration}$ (e.g. ~18 minutes at `--duration 180`, ~6 minutes at `--duration 60`).
 ---
 
 ## Manual Execution Workflow
@@ -107,7 +132,7 @@ $RUNTIME run --rm --network host \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
   --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
-  --constraint kind=max_duration,seconds=60 \
+  --constraint kind=max_duration,seconds=180 \
   --profile kind=synchronous \
   --output kind=csv,path=/results/benchmarks.csv \
   --output kind=json,path=/results/benchmarks.json \
@@ -123,7 +148,7 @@ $RUNTIME run --rm --network host \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
   --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
-  --constraint kind=max_duration,seconds=60 \
+  --constraint kind=max_duration,seconds=180 \
   --profile kind=throughput,max_concurrency=32,rampup_duration=10 \
   --output kind=csv,path=/results/benchmarks.csv \
   --output kind=json,path=/results/benchmarks.json \
@@ -139,7 +164,7 @@ $RUNTIME run --rm --network host \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
   --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
-  --constraint kind=max_duration,seconds=60 \
+  --constraint kind=max_duration,seconds=180 \
   --profile kind=concurrent,streams=16,rampup_duration=10 \
   --output kind=csv,path=/results/benchmarks.csv \
   --output kind=json,path=/results/benchmarks.json \
@@ -155,7 +180,7 @@ $RUNTIME run --rm --network host \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
   --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
-  --constraint kind=max_duration,seconds=60 \
+  --constraint kind=max_duration,seconds=180 \
   --profile kind=constant,rate=10,rampup_duration=10 \
   --output kind=csv,path=/results/benchmarks.csv \
   --output kind=json,path=/results/benchmarks.json \
@@ -171,7 +196,7 @@ $RUNTIME run --rm --network host \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
   --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
-  --constraint kind=max_duration,seconds=60 \
+  --constraint kind=max_duration,seconds=180 \
   --profile kind=poisson,rate=10 --seed kind=static,value=42 \
   --output kind=csv,path=/results/benchmarks.csv \
   --output kind=json,path=/results/benchmarks.json \
@@ -187,7 +212,7 @@ $RUNTIME run --rm --network host \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
   --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
-  --constraint kind=max_duration,seconds=60 \
+  --constraint kind=max_duration,seconds=180 \
   --profile kind=sweep,sweep_size=6,rampup_duration=10 \
   --output kind=csv,path=/results/benchmarks.csv \
   --output kind=json,path=/results/benchmarks.json \

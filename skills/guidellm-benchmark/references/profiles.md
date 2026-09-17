@@ -120,7 +120,7 @@ Constraints govern when each strategy stops:
 
 | Constraint | Syntax | Description |
 |---|---|---|
-| `max_duration` | `--constraint kind=max_duration,seconds=60` | Stop strategy after N elapsed seconds. |
+| `max_duration` | `--constraint kind=max_duration,seconds=180` | Stop strategy after N elapsed seconds (recommend 180–300s for 8k->1k, 60s for smoke). |
 | `max_requests` | `--constraint kind=max_requests,count=500` | Stop strategy after N requests are processed. |
 | `over_saturation` | `--constraint kind=over_saturation,min_seconds=30` | Auto-abort if server latency explodes due to saturation. |
 
@@ -136,3 +136,32 @@ Selecting realistic prompt and output token lengths is critical for representati
 | **Conversational Chat** | **2,048** | **512** | Typical multi-turn user conversation with moderate context history. |
 | **Reasoning / Chain-of-Thought** | **4,096** | **2,048** | Models with extended reasoning chains (o1/DeepSeek-R1 style) generating detailed output tokens. |
 | **Smoke / Quick Test** | **256** | **128** | Lightweight sanity check for container networking and API connectivity. |
+
+---
+
+## Duration Constraints & Statistical Validity
+
+A common pitfall in LLM load testing is choosing a `--duration` that is too short relative to single-request decode time.
+
+### Mathematical Basis
+
+1. **Decode Time per Request**:
+   $$\text{Request Latency} \approx \text{TTFT} + \frac{\text{Output Tokens}}{\text{Decode Throughput per Stream}}$$
+   For a 27B model generating 1,024 tokens at 30 tokens/sec:
+   $$\text{Request Latency} \approx 1.5\text{s} + \frac{1024}{30} \approx 35.6\text{ seconds}$$
+
+2. **Ramp-up Penalty**:
+   GuideLLM applies a 10-second concurrency ramp-up (`rampup_duration=10`) in rate and concurrent profiles.
+
+3. **Sample Count at 60 Seconds**:
+   $$\text{Usable Duration} = 60\text{s} - 10\text{s} = 50\text{s}$$
+   $$\text{Completed Requests per Stream} = \left\lfloor \frac{50\text{s}}{35.6\text{s}} \right\rfloor = 1$$
+   - Sequential (`synchronous`) profile completes exactly **1 request** before timeout ($N=1$).
+   - Percentiles (P90, P99), latency jitter, and standard deviation are mathematically unreliable with $N \le 2$.
+
+### Recommendations
+
+- **Smoke Test (`--duration 60` or `--preset quick`)**: Useful solely to verify container image pulling, host network loopback access, memory stability, and report generation.
+- **Production Benchmark (`--duration 180` to `300`)**: Standard for 8k $\to$ 1k workloads. Provides 6–10 completed requests per stream, stable KV-cache warmup, and reproducible P50/P90/P99 latency metrics.
+- **Fast Iteration Alternative (`-o 256 -d 90`)**: Reducing output tokens to 256 allows requests to finish in ~8–10 seconds, yielding statistically meaningful sample counts in under 2 minutes.
+- **Multi-Strategy Sweep Multiplier**: The `sweep` profile runs 6 strategies sequentially. Total time for `sweep` will equal $6 \times \text{duration}$ (e.g. ~18 minutes at 180s, ~30 minutes at 300s).

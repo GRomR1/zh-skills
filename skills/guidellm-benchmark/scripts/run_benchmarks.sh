@@ -10,7 +10,7 @@ set -euo pipefail
 ENDPOINT="http://localhost:8000"
 CONTAINER_NAME=""
 RUNTIME=""
-MAX_DURATION="60"
+MAX_DURATION="180" # Default 180s for statistically valid 8k->1k runs; use 60s for smoke testing
 PRESET="8k-1k"
 PROMPT_TOKENS="8192"
 OUTPUT_TOKENS="1024"
@@ -25,8 +25,8 @@ Options:
   -e, --endpoint URL          Target OpenAI-compatible endpoint (default: http://localhost:8000)
   -c, --container NAME        Name or ID of serving container (vLLM/SGLang) to inspect
   -r, --runtime RUNTIME       Container runtime: docker or nerdctl (default: auto-detect)
-  -d, --duration SECONDS      Max duration constraint per profile strategy in seconds (default: 60)
-  --preset PRESET             Token preset: 8k-1k (default), chat (2k->512), reasoning (4k->2k), quick (256->128)
+  -d, --duration SECONDS      Max duration constraint per profile strategy (default: 180s, use 60s for smoke)
+  --preset PRESET             Workload preset: 8k-1k (default, 180s), chat (2k->512, 120s), reasoning (4k->2k, 240s), quick (256->128, 60s)
   -p, --prompt-tokens NUM     Synthetic prompt token count (default: 8192)
   -o, --output-tokens NUM     Synthetic output token count (default: 1024)
   -i, --image IMAGE           GuideLLM container image (default: ghcr.io/vllm-project/guidellm:latest)
@@ -61,18 +61,22 @@ while [[ $# -gt 0 ]]; do
         8k-1k|rag|standard)
           PROMPT_TOKENS="8192"
           OUTPUT_TOKENS="1024"
+          MAX_DURATION="180"
           ;;
         chat)
           PROMPT_TOKENS="2048"
           OUTPUT_TOKENS="512"
+          MAX_DURATION="120"
           ;;
         reasoning)
           PROMPT_TOKENS="4096"
           OUTPUT_TOKENS="2048"
+          MAX_DURATION="240"
           ;;
         quick|smoke)
           PROMPT_TOKENS="256"
           OUTPUT_TOKENS="128"
+          MAX_DURATION="60"
           ;;
         *)
           echo "Warning: Unknown preset '$PRESET'. Keeping current values."
