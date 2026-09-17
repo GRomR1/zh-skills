@@ -15,6 +15,7 @@ PRESET="8k-1k"
 PROMPT_TOKENS="8192"
 OUTPUT_TOKENS="1024"
 SELECTED_PROFILE="sweep" # Default: sweep (covers baseline sync, peak throughput, and interpolated rates)
+HOST_MODEL_PATH=""       # Host path to model weights/tokenizer (for offline/air-gapped runs)
 GUIDELLM_IMAGE="ghcr.io/vllm-project/guidellm:latest"
 DRY_RUN=false
 
@@ -30,10 +31,10 @@ Options:
   --preset PRESET             Workload preset: 8k-1k (default, 180s), chat (2k->512, 120s), reasoning (4k->2k, 240s), quick (256->128, 60s)
   --profile PROFILE           Profile to run: sweep (default), concurrent, synchronous, throughput, constant, poisson, or all
   --launch-config FILE        Path to existing launch_config.json to bundle with run
+  -m, --model-path PATH       Host path to model directory for offline tokenizer loading (avoids Errno 101)
   -p, --prompt-tokens NUM     Synthetic prompt token count (default: 8192)
   -o, --output-tokens NUM     Synthetic output token count (default: 1024)
   -i, --image IMAGE           GuideLLM container image (default: ghcr.io/vllm-project/guidellm:latest)
-  -h, --help                  Show this help message
 EOF
   exit 1
 }
@@ -94,6 +95,10 @@ while [[ $# -gt 0 ]]; do
       USER_LAUNCH_CONFIG="$2"
       shift 2
       ;;
+    -m|--model-path)
+      HOST_MODEL_PATH="$2"
+      shift 2
+      ;;
     -p|--prompt-tokens)
       PROMPT_TOKENS="$2"
       shift 2
@@ -146,6 +151,7 @@ echo "Serving Container:  ${CONTAINER_NAME:-None (unspecified)}"
 echo "Container Runtime:  ${RUNTIME}"
 echo "Output Directory:   ${TARGET_DIR}"
 echo "Selected Profile:   ${SELECTED_PROFILE}"
+echo "Local Model Path:   ${HOST_MODEL_PATH:-Auto-detecting...}"
 echo "GuideLLM Image:     ${GUIDELLM_IMAGE}"
 echo "Dry Run Mode:       ${DRY_RUN}"
 echo "============================================================"
@@ -184,6 +190,38 @@ if [[ -n "$CONTAINER_NAME" && "$DRY_RUN" = false ]]; then
   fi
 fi
 
+    # Auto-detect host model path if not explicitly provided
+    if [[ -z "$HOST_MODEL_PATH" ]]; then
+      HOST_MODEL_PATH=$(python3 -c '
+import json, sys, os
+inspect_file = sys.argv[1]
+try:
+    with open(inspect_file) as f:
+        data = json.load(f)
+    cdata = data[0] if isinstance(data, list) else data
+    cmd = cdata.get("Config", {}).get("Cmd") or []
+    model_arg = ""
+    for i in range(len(cmd) - 1):
+        if cmd[i] == "--model":
+            model_arg = cmd[i+1]
+            break
+    mounts = cdata.get("Mounts") or []
+    for m in mounts:
+        dest = m.get("Destination", "")
+        src = m.get("Source", "")
+        if model_arg.startswith(dest) and dest != "/":
+            rel = os.path.relpath(model_arg, dest)
+            candidate = os.path.join(src, rel) if rel != "." else src
+            if os.path.exists(candidate):
+                print(candidate)
+                sys.exit(0)
+except Exception:
+    pass
+' "${TARGET_DIR}/serving_container_inspect.json" 2>/dev/null || true)
+      if [[ -n "$HOST_MODEL_PATH" ]]; then
+        echo "Auto-detected host model directory: ${HOST_MODEL_PATH}"
+      fi
+    fi
 # 3. Define load profiles
 # All GuideLLM benchmark profiles:
 # - synchronous: sequential baseline
@@ -233,16 +271,26 @@ for profile in "${PROFILES[@]}"; do
 
   PROFILE_ARGS="${PROFILE_CONFIGS[$profile]}"
 
+  # Offline tokenizer configuration if local model path exists
+  EXTRA_VOLUMES=()
+  TOKENIZER_ARGS=()
+  if [[ -n "$HOST_MODEL_PATH" && (-d "$HOST_MODEL_PATH" || "$DRY_RUN" = true) ]]; then
+    EXTRA_VOLUMES=("-v" "${HOST_MODEL_PATH}:/model:ro")
+    TOKENIZER_ARGS=(--tokenizer '{"kind":"huggingface_auto","model":"/model","load_kwargs":{"trust_remote_code":true}}')
+  fi
+
   CMD=(
     "$RUNTIME" run --rm
     --network host
     -v "${PROFILE_DIR}:/results:rw"
+    "${EXTRA_VOLUMES[@]}"
     "$GUIDELLM_IMAGE"
     run
     --backend "kind=openai_http,target=${ENDPOINT}"
     --data "kind=synthetic_text,prompt_tokens=${PROMPT_TOKENS},output_tokens=${OUTPUT_TOKENS}"
     --constraint "kind=max_duration,seconds=${MAX_DURATION}"
     $PROFILE_ARGS
+    "${TOKENIZER_ARGS[@]}"
     --output "kind=csv,path=/results/benchmarks.csv"
     --output "kind=json,path=/results/benchmarks.json"
     --output "kind=html,path=/results/benchmarks.html"

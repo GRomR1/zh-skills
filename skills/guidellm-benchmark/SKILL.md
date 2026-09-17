@@ -269,20 +269,63 @@ Create `${RUN_DIR}/REPORT.md` linking to all run outputs. Follow the structure d
 
 ---
 
-## Important Rules & Tips
+## Critical Rules & Troubleshooting
 
-1. **Container Subcommand**:
-   Always pass `run` after `ghcr.io/vllm-project/guidellm:latest`. The image entrypoint is `/opt/app-root/bin/guidellm`; passing flags directly replaces the container command and causes command parse errors.
+### 1. Offline / Air-Gapped Environments (`[Errno 101] Network is unreachable`)
 
-2. **Network Mode**:
-   Always specify `--network host` so the GuideLLM container can access services running on host loopback (`http://localhost:8000`).
+**Symptom**:
+```
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='huggingface.co', port=443):
+Max retries exceeded with url: ... [Errno 101] Network is unreachable
+```
 
-3. **Output Formats**:
-   Specify `--output` repeatedly for each required format (`csv`, `json`, `html`, `plot`). For PNG charts, use `--output kind=plot,path=/results/benchmarks.png`.
+**Root Cause**:
+GuideLLM by default tries to resolve and download the model tokenizer from Hugging Face for token counting and synthetic text generation. In isolated clusters or nodes without outbound internet access, this lookup immediately fails.
 
-4. **Preserving LLM Context**:
-   When reporting completion to the user, present the summary of the environment and the paths to `REPORT.md` and the artifact files. Do not dump CSV rows or benchmark numbers into the chat.
+**Solution**:
+Mount the host model directory into the GuideLLM container at `/model:ro` and point the tokenizer to that local directory with `trust_remote_code: true`:
 
+```bash
+# Using Docker/Nerdctl CLI flags:
+-v /bmcp_lvm_fs/cusa/models/Qwen3.8-27B:/model:ro \
+--tokenizer '{"kind":"huggingface_auto","model":"/model","load_kwargs":{"trust_remote_code":true}}'
+```
+
+Or via GuideLLM environment variables:
+```bash
+nerdctl run --rm --network host \
+  -v /bmcp_lvm_fs/cusa/models/Qwen3.8-27B:/model:ro \
+  -v "$(pwd)/results:/results:rw" \
+  -e GUIDELLM__SPEC__BACKEND='{"kind": "openai_http", "target": "http://localhost:8000", "model": "qwen3.8-27b"}' \
+  -e GUIDELLM__SPEC__PROFILE='{"kind": "sweep"}' \
+  -e GUIDELLM__SPEC__CONSTRAINTS='[{"kind": "max_duration", "seconds": 180}]' \
+  -e GUIDELLM__SPEC__DATA='[{"kind": "synthetic_text", "prompt_tokens": 8192, "output_tokens": 1024}]' \
+  -e GUIDELLM__SPEC__TOKENIZER='{"kind": "huggingface_auto", "model": "/model", "load_kwargs": {"trust_remote_code": true}}' \
+  ghcr.io/vllm-project/guidellm:latest
+```
+
+In `scripts/run_benchmarks.sh`, pass `--model-path`:
+```bash
+bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
+  --endpoint http://localhost:8000 \
+  --container qwen27b-fp8-tp1 \
+  --model-path /bmcp_lvm_fs/cusa/models/Qwen3.8-27B-FP8
+```
+*(Note: `run_benchmarks.sh` will also automatically detect the host model path from the container inspect JSON if `--container` is provided!)*
+
+---
+
+### 2. Container Subcommand
+Always pass `run` after `ghcr.io/vllm-project/guidellm:latest`. The image entrypoint is `/opt/app-root/bin/guidellm`; passing flags directly replaces the container command and causes command parse errors.
+
+### 3. Network Mode
+Always specify `--network host` so the GuideLLM container can access services running on host loopback (`http://localhost:8000`).
+
+### 4. Output Formats
+Specify `--output` repeatedly for each required format (`csv`, `json`, `html`, `plot`). For PNG charts, use `--output kind=plot,path=/results/benchmarks.png`.
+
+### 5. Preserving LLM Context
+When reporting completion to the user, present the summary of the environment and the paths to `REPORT.md` and the artifact files. Do not dump CSV rows or benchmark numbers into the chat.
 ---
 
 ## Deep-Dive References
