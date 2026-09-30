@@ -9,14 +9,13 @@ set -euo pipefail
 
 ENDPOINT="http://localhost:8000"
 CONTAINER_NAME=""
-RUNTIME=""
-MAX_DURATION="180" # Default 180s for statistically valid 8k->1k runs; use 60s for smoke testing
+RUNTIME="${RUNTIME:-}"
+MAX_DURATION="60"
 PRESET="8k-1k"
 PROMPT_TOKENS="8192"
 OUTPUT_TOKENS="1024"
-SELECTED_PROFILE="sweep" # Default: sweep (covers baseline sync, peak throughput, and interpolated rates)
-HOST_MODEL_PATH=""       # Host path to model weights/tokenizer (for offline/air-gapped runs)
 GUIDELLM_IMAGE="ghcr.io/vllm-project/guidellm:latest"
+MODELS_DIR=""
 DRY_RUN=false
 
 usage() {
@@ -26,15 +25,17 @@ Usage: $(basename "$0") [OPTIONS]
 Options:
   -e, --endpoint URL          Target OpenAI-compatible endpoint (default: http://localhost:8000)
   -c, --container NAME        Name or ID of serving container (vLLM/SGLang) to inspect
-  -r, --runtime RUNTIME       Container runtime: docker or nerdctl (default: auto-detect)
-  -d, --duration SECONDS      Max duration constraint per profile strategy (default: 180s, use 60s for smoke)
-  --preset PRESET             Workload preset: 8k-1k (default, 180s), chat (2k->512, 120s), reasoning (4k->2k, 240s), quick (256->128, 60s)
-  --profile PROFILE           Profile to run: sweep (default), concurrent, synchronous, throughput, constant, poisson, or all
-  --launch-config FILE        Path to existing launch_config.json to bundle with run
-  -m, --model-path PATH       Host path to model directory for offline tokenizer loading (avoids Errno 101)
+  -r, --runtime RUNTIME       GuideLLM container runtime: docker or nerdctl (default: auto-detect;
+                              container inspect falls back to the other runtime automatically)
+  -d, --duration SECONDS      Max duration constraint per profile strategy in seconds (default: 60)
+  --preset PRESET             Token preset: 8k-1k (default), chat (2k->512), reasoning (4k->2k), quick (256->128)
   -p, --prompt-tokens NUM     Synthetic prompt token count (default: 8192)
   -o, --output-tokens NUM     Synthetic output token count (default: 1024)
   -i, --image IMAGE           GuideLLM container image (default: ghcr.io/vllm-project/guidellm:latest)
+  -m, --models-dir DIR        Host directory with model weights (listed in serving_launch_info.txt;
+                              recorded as the tokenizer/model source for the report)
+  --dry-run                   Print commands without executing
+  -h, --help                  Show this help message
 EOF
   exit 1
 }
@@ -64,39 +65,23 @@ while [[ $# -gt 0 ]]; do
         8k-1k|rag|standard)
           PROMPT_TOKENS="8192"
           OUTPUT_TOKENS="1024"
-          MAX_DURATION="180"
           ;;
         chat)
           PROMPT_TOKENS="2048"
           OUTPUT_TOKENS="512"
-          MAX_DURATION="120"
           ;;
         reasoning)
           PROMPT_TOKENS="4096"
           OUTPUT_TOKENS="2048"
-          MAX_DURATION="240"
           ;;
         quick|smoke)
           PROMPT_TOKENS="256"
           OUTPUT_TOKENS="128"
-          MAX_DURATION="60"
           ;;
         *)
           echo "Warning: Unknown preset '$PRESET'. Keeping current values."
           ;;
       esac
-      shift 2
-      ;;
-    --profile)
-      SELECTED_PROFILE="$2"
-      shift 2
-      ;;
-    --launch-config)
-      USER_LAUNCH_CONFIG="$2"
-      shift 2
-      ;;
-    -m|--model-path)
-      HOST_MODEL_PATH="$2"
       shift 2
       ;;
     -p|--prompt-tokens)
@@ -109,6 +94,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -i|--image)
       GUIDELLM_IMAGE="$2"
+      shift 2
+      ;;
+    -m|--models-dir)
+      MODELS_DIR="$2"
       shift 2
       ;;
     --dry-run)
@@ -150,15 +139,12 @@ echo "Target Endpoint:    ${ENDPOINT}"
 echo "Serving Container:  ${CONTAINER_NAME:-None (unspecified)}"
 echo "Container Runtime:  ${RUNTIME}"
 echo "Output Directory:   ${TARGET_DIR}"
-echo "Selected Profile:   ${SELECTED_PROFILE}"
-echo "Local Model Path:   ${HOST_MODEL_PATH:-Auto-detecting...}"
 echo "GuideLLM Image:     ${GUIDELLM_IMAGE}"
 echo "Dry Run Mode:       ${DRY_RUN}"
 echo "============================================================"
 
 if [[ "$DRY_RUN" = false ]]; then
   mkdir -p "${TARGET_DIR}/profiles"
-  chmod 777 "${TARGET_DIR}" "${TARGET_DIR}/profiles" 2>/dev/null || true
 fi
 
 # 1. Inspect target model endpoint
@@ -177,52 +163,73 @@ CONTAINER_CMD="N/A"
 CONTAINER_DEVICES="N/A"
 CONTAINER_MOUNTS="N/A"
 CONTAINER_ENV="N/A"
+INSPECT_RT="${RUNTIME}"
+
+# The serving container may run under either runtime — try the chosen GuideLLM
+# runtime first, then the other one available on this host.
+inspect_serving_container() {
+  local rt candidates=("$RUNTIME")
+  for alt in docker nerdctl; do
+    [[ "$alt" == "$RUNTIME" ]] || candidates+=("$alt")
+  done
+  for rt in "${candidates[@]}"; do
+    if command -v "$rt" &>/dev/null && $rt inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+      echo "$rt"
+      return 0
+    fi
+  done
+  return 1
+}
 
 if [[ -n "$CONTAINER_NAME" && "$DRY_RUN" = false ]]; then
-  echo "Inspecting serving container '${CONTAINER_NAME}' via ${RUNTIME}..."
-  if $RUNTIME inspect "$CONTAINER_NAME" > "${TARGET_DIR}/serving_container_inspect.json" 2>/dev/null; then
-    CONTAINER_IMAGE=$($RUNTIME inspect --format '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || echo "N/A")
-    CONTAINER_CMD=$($RUNTIME inspect --format '{{json .Config.Cmd}}' "$CONTAINER_NAME" 2>/dev/null || echo "N/A")
-    CONTAINER_DEVICES=$($RUNTIME inspect --format '{{json .HostConfig.Devices}}' "$CONTAINER_NAME" 2>/dev/null || echo "N/A")
-    CONTAINER_MOUNTS=$($RUNTIME inspect --format '{{json .Mounts}}' "$CONTAINER_NAME" 2>/dev/null || echo "N/A")
-    CONTAINER_ENV=$($RUNTIME inspect --format '{{json .Config.Env}}' "$CONTAINER_NAME" 2>/dev/null || echo "N/A")
+  echo "Inspecting serving container '${CONTAINER_NAME}'..."
+  if INSPECT_RT=$(inspect_serving_container); then
+    echo "Inspect runtime: ${INSPECT_RT}"
+    $INSPECT_RT inspect "$CONTAINER_NAME" > "${TARGET_DIR}/serving_container_inspect.json" 2>/dev/null
+    CONTAINER_IMAGE=$($INSPECT_RT inspect --format '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || echo "N/A")
+    CONTAINER_CMD=$($INSPECT_RT inspect --format '{{json .Config.Cmd}}' "$CONTAINER_NAME" 2>/dev/null || echo "N/A")
+    CONTAINER_DEVICES=$($INSPECT_RT inspect --format '{{json .HostConfig.Devices}}' "$CONTAINER_NAME" 2>/dev/null || echo "N/A")
+    CONTAINER_MOUNTS=$($INSPECT_RT inspect --format '{{json .Mounts}}' "$CONTAINER_NAME" 2>/dev/null || echo "N/A")
+    CONTAINER_ENV=$($INSPECT_RT inspect --format '{{json .Config.Env}}' "$CONTAINER_NAME" 2>/dev/null || echo "N/A")
+
+    # Human-readable launch configuration: image/entrypoint/cmd, mounts,
+    # devices, ports, env, groups, security opts, ulimits, caps, model dir.
+    $INSPECT_RT inspect "$CONTAINER_NAME" --format '
+IMAGE: {{.Config.Image}}
+ENTRYPOINT: {{json .Config.Entrypoint}}
+CMD: {{json .Config.Cmd}}
+MOUNTS:
+{{range .Mounts}}  {{.Source}} -> {{.Destination}} ({{.Mode}})
+{{end}}DEVICES:
+{{range .HostConfig.Devices}}  {{.PathOnHost}} -> {{.PathInContainer}} {{.CgroupPermissions}}
+{{end}}PORTS:
+{{range $p, $b := .NetworkSettings.Ports}}  {{$p}} -> {{$b}}
+{{end}}ENV:
+{{range .Config.Env}}  {{.}}
+{{end}}GROUP_ADD:
+  {{.HostConfig.GroupAdd}}
+SECURITY_OPT:
+  {{.HostConfig.SecurityOpt}}
+ULIMITS:
+  {{range .HostConfig.Ulimits}}  {{.Name}}={{.Soft}}:{{.Hard}}
+{{end}}CAP_ADD:
+  {{.HostConfig.CapAdd}}' > "${TARGET_DIR}/serving_launch_info.txt" 2>&1 || true
   else
     echo "Warning: Unable to inspect container '${CONTAINER_NAME}'"
+    echo "(container inspect unavailable: ${CONTAINER_NAME})" > "${TARGET_DIR}/serving_launch_info.txt"
   fi
+
+  {
+    if [[ -n "$MODELS_DIR" ]]; then
+      echo "=== MODEL CHECK (tokenizer/model source: ${MODELS_DIR}) ==="
+      ls -la "${MODELS_DIR}" 2>&1 || true
+    else
+      echo "=== MODEL CHECK ==="
+      echo "(host models dir not specified; pass --models-dir to record it)"
+    fi
+  } >> "${TARGET_DIR}/serving_launch_info.txt"
 fi
 
-    # Auto-detect host model path if not explicitly provided
-    if [[ -z "$HOST_MODEL_PATH" ]]; then
-      HOST_MODEL_PATH=$(python3 -c '
-import json, sys, os
-inspect_file = sys.argv[1]
-try:
-    with open(inspect_file) as f:
-        data = json.load(f)
-    cdata = data[0] if isinstance(data, list) else data
-    cmd = cdata.get("Config", {}).get("Cmd") or []
-    model_arg = ""
-    for i in range(len(cmd) - 1):
-        if cmd[i] == "--model":
-            model_arg = cmd[i+1]
-            break
-    mounts = cdata.get("Mounts") or []
-    for m in mounts:
-        dest = m.get("Destination", "")
-        src = m.get("Source", "")
-        if model_arg.startswith(dest) and dest != "/":
-            rel = os.path.relpath(model_arg, dest)
-            candidate = os.path.join(src, rel) if rel != "." else src
-            if os.path.exists(candidate):
-                print(candidate)
-                sys.exit(0)
-except Exception:
-    pass
-' "${TARGET_DIR}/serving_container_inspect.json" 2>/dev/null || true)
-      if [[ -n "$HOST_MODEL_PATH" ]]; then
-        echo "Auto-detected host model directory: ${HOST_MODEL_PATH}"
-      fi
-    fi
 # 3. Define load profiles
 # All GuideLLM benchmark profiles:
 # - synchronous: sequential baseline
@@ -231,15 +238,6 @@ except Exception:
 # - constant: fixed request rate
 # - poisson: Poisson distributed arrival rate
 # - sweep: adaptive multi-strategy interpolation sweep
-declare -A PROFILE_DESCRIPTIONS=(
-  ["synchronous"]="Sequential requests measuring baseline latency"
-  ["throughput"]="Peak throughput discovery with parallel workers"
-  ["concurrent"]="Multi-stream parallel load testing"
-  ["constant"]="Sustained rate (requests per second) testing"
-  ["poisson"]="Probabilistic Poisson traffic distribution"
-  ["sweep"]="Multi-strategy adaptive rate interpolation sweep"
-)
-
 declare -A PROFILE_CONFIGS=(
   ["synchronous"]="--profile kind=synchronous"
   ["throughput"]="--profile kind=throughput,max_concurrency=32,rampup_duration=10"
@@ -249,16 +247,7 @@ declare -A PROFILE_CONFIGS=(
   ["sweep"]="--profile kind=sweep,sweep_size=6,rampup_duration=10"
 )
 
-ALL_PROFILES=("synchronous" "throughput" "concurrent" "constant" "poisson" "sweep")
-
-if [[ "$SELECTED_PROFILE" == "all" ]]; then
-  PROFILES=("${ALL_PROFILES[@]}")
-elif [[ -n "${PROFILE_CONFIGS[$SELECTED_PROFILE]:-}" ]]; then
-  PROFILES=("$SELECTED_PROFILE")
-else
-  echo "Error: Unknown profile '${SELECTED_PROFILE}'. Choose one of: sweep, concurrent, synchronous, throughput, constant, poisson, all."
-  exit 1
-fi
+PROFILES=("synchronous" "throughput" "concurrent" "constant" "poisson" "sweep")
 
 for profile in "${PROFILES[@]}"; do
   echo "------------------------------------------------------------"
@@ -268,29 +257,20 @@ for profile in "${PROFILES[@]}"; do
   PROFILE_DIR="${TARGET_DIR}/profiles/${profile}"
   if [[ "$DRY_RUN" = false ]]; then
     mkdir -p "${PROFILE_DIR}"
-    chmod 777 "${PROFILE_DIR}" 2>/dev/null || true
   fi
 
-  # Offline tokenizer configuration if local model path exists
-  EXTRA_VOLUMES=()
-  TOKENIZER_ARGS=()
-  if [[ -n "$HOST_MODEL_PATH" && (-d "$HOST_MODEL_PATH" || "$DRY_RUN" = true) ]]; then
-    EXTRA_VOLUMES=("-v" "${HOST_MODEL_PATH}:/model:ro")
-    TOKENIZER_ARGS=(--tokenizer '{"kind":"huggingface_auto","model":"/model","load_kwargs":{"trust_remote_code":true}}')
-  fi
+  PROFILE_ARGS="${PROFILE_CONFIGS[$profile]}"
 
   CMD=(
     "$RUNTIME" run --rm
     --network host
     -v "${PROFILE_DIR}:/results:rw"
-    "${EXTRA_VOLUMES[@]}"
     "$GUIDELLM_IMAGE"
     run
     --backend "kind=openai_http,target=${ENDPOINT}"
     --data "kind=synthetic_text,prompt_tokens=${PROMPT_TOKENS},output_tokens=${OUTPUT_TOKENS}"
     --constraint "kind=max_duration,seconds=${MAX_DURATION}"
     $PROFILE_ARGS
-    "${TOKENIZER_ARGS[@]}"
     --output "kind=csv,path=/results/benchmarks.csv"
     --output "kind=json,path=/results/benchmarks.json"
     --output "kind=html,path=/results/benchmarks.html"
@@ -304,95 +284,10 @@ for profile in "${PROFILES[@]}"; do
   fi
 done
 
-# 4. Generate launch_config.json and report
+# 4. Generate report with metadata and links
 REPORT_FILE="${TARGET_DIR}/REPORT.md"
-LAUNCH_CONFIG_FILE="${TARGET_DIR}/launch_config.json"
 
 if [[ "$DRY_RUN" = false ]]; then
-  # Handle launch_config.json
-  if [[ -n "${USER_LAUNCH_CONFIG:-}" && -f "$USER_LAUNCH_CONFIG" ]]; then
-    cp "$USER_LAUNCH_CONFIG" "$LAUNCH_CONFIG_FILE"
-  else
-    # Construct launch_config.json from inspection and runtime info
-    python3 -c '
-import json, sys, os
-
-target_dir = sys.argv[1]
-container_name = sys.argv[2]
-runtime = sys.argv[3]
-model_id = sys.argv[4]
-endpoint = sys.argv[5]
-
-inspect_path = os.path.join(target_dir, "serving_container_inspect.json")
-config = {
-    "model": model_id,
-    "served_model_name": model_id,
-    "port": 8000,
-    "runtime": runtime,
-    "container_name": container_name or "unspecified",
-}
-
-if os.path.exists(inspect_path):
-    try:
-        with open(inspect_path) as f:
-            data = json.load(f)
-        if isinstance(data, list) and len(data) > 0:
-            cdata = data[0]
-        else:
-            cdata = data
-
-        cmd = cdata.get("Config", {}).get("Cmd") or []
-        config["container_image"] = cdata.get("Config", {}).get("Image", "N/A")
-        config["command"] = cmd
-
-        # Parse common vLLM CLI flags from command list
-        i = 0
-        while i < len(cmd):
-            arg = cmd[i]
-            if arg == "--model" and i + 1 < len(cmd):
-                config["model"] = cmd[i + 1]
-            elif arg == "--served-model-name" and i + 1 < len(cmd):
-                config["served_model_name"] = cmd[i + 1]
-            elif arg == "--port" and i + 1 < len(cmd):
-                config["port"] = int(cmd[i + 1])
-            elif arg == "--tensor-parallel-size" and i + 1 < len(cmd):
-                config["tensor_parallel_size"] = int(cmd[i + 1])
-            elif arg == "--gpu-memory-utilization" and i + 1 < len(cmd):
-                config["gpu_memory_utilization"] = float(cmd[i + 1])
-            elif arg == "--max-model-len" and i + 1 < len(cmd):
-                config["max_model_len"] = int(cmd[i + 1])
-            elif arg == "--max-num-seqs" and i + 1 < len(cmd):
-                config["max_num_seqs"] = int(cmd[i + 1])
-            elif arg == "--kv-cache-dtype" and i + 1 < len(cmd):
-                config["kv_cache_dtype"] = cmd[i + 1]
-            elif arg == "--distributed-executor-backend" and i + 1 < len(cmd):
-                config["distributed_executor_backend"] = cmd[i + 1]
-            elif arg == "--trust-remote-code":
-                config["trust_remote_code"] = True
-            elif arg == "--enable-chunked-prefill":
-                config["enable_chunked_prefill"] = True
-            elif arg == "--no-enable-prefix-caching":
-                config["no_enable_prefix_caching"] = True
-            i += 1
-
-        # Devices
-        devices = cdata.get("HostConfig", {}).get("Devices") or []
-        config["devices"] = [d.get("PathOnHost", d.get("path", "")) for d in devices if isinstance(d, dict)]
-        config["shm_size"] = str(cdata.get("HostConfig", {}).get("ShmSize", "N/A"))
-    except Exception as e:
-        config["parse_error"] = str(e)
-
-with open(os.path.join(target_dir, "launch_config.json"), "w") as f:
-    json.dump(config, f, indent=2)
-' "${TARGET_DIR}" "${CONTAINER_NAME:-}" "${RUNTIME}" "${MODEL_ID}" "${ENDPOINT}" 2>/dev/null || true
-  fi
-
-  TABLE_ROWS=""
-  for p in "${PROFILES[@]}"; do
-    desc="${PROFILE_DESCRIPTIONS[$p]:-Benchmark profile}"
-    TABLE_ROWS+="| **${p}** | ${desc} | [CSV](profiles/${p}/benchmarks.csv) \| [JSON](profiles/${p}/benchmarks.json) \| [HTML Report](profiles/${p}/benchmarks.html) \| [Chart (PNG)](profiles/${p}/benchmarks.png) |"$'\n'
-  done
-
   cat <<EOF > "${REPORT_FILE}"
 # LLM Benchmark Environment & Measurement Report
 
@@ -402,7 +297,6 @@ with open(os.path.join(target_dir, "launch_config.json"), "w") as f:
 - **Model Identifier**: \`${MODEL_ID}\`
 - **Container Runtime**: \`${RUNTIME}\`
 - **Serving Container**: \`${CONTAINER_NAME:-unspecified}\`
-- **Selected Profile**: \`${SELECTED_PROFILE}\`
 - **GuideLLM Image**: \`${GUIDELLM_IMAGE}\`
 
 ---
@@ -413,9 +307,8 @@ with open(os.path.join(target_dir, "launch_config.json"), "w") as f:
 - **Resolved Model ID**: \`${MODEL_ID}\`
 - **Endpoint URL**: \`${ENDPOINT}\`
 - **Model Info JSON**: [\`model_info.json\`](model_info.json)
-- **Model Launch Configuration**: [\`launch_config.json\`](launch_config.json)
 
-### Container Configuration (from \`${RUNTIME} inspect\`)
+### Container Configuration (from \`${INSPECT_RT} inspect\`)
 - **Serving Image**: \`${CONTAINER_IMAGE}\`
 - **Container Command / Arguments**:
 \`\`\`json
@@ -430,6 +323,8 @@ ${CONTAINER_DEVICES}
 ${CONTAINER_MOUNTS}
 \`\`\`
 - **Full Container Inspection**: [\`serving_container_inspect.json\`](serving_container_inspect.json)
+- **Launch Configuration (mounts/devices/ports/env/ulimits/cmd)**: [\`serving_launch_info.txt\`](serving_launch_info.txt)
+- **Model Dir Contents**: \`--models-dir\` ${MODELS_DIR:-not specified}
 
 ---
 
@@ -439,14 +334,19 @@ ${CONTAINER_MOUNTS}
 
 | Profile | Profile Description | Generated Artifacts (Links) |
 |---|---|---|
-${TABLE_ROWS}
+| **synchronous** | Sequential requests measuring baseline latency | [CSV](profiles/synchronous/benchmarks.csv) \| [JSON](profiles/synchronous/benchmarks.json) \| [HTML Report](profiles/synchronous/benchmarks.html) \| [Chart (PNG)](profiles/synchronous/benchmarks.png) |
+| **throughput** | Peak throughput discovery with parallel workers | [CSV](profiles/throughput/benchmarks.csv) \| [JSON](profiles/throughput/benchmarks.json) \| [HTML Report](profiles/throughput/benchmarks.html) \| [Chart (PNG)](profiles/throughput/benchmarks.png) |
+| **concurrent** | Multi-stream parallel load testing | [CSV](profiles/concurrent/benchmarks.csv) \| [JSON](profiles/concurrent/benchmarks.json) \| [HTML Report](profiles/concurrent/benchmarks.html) \| [Chart (PNG)](profiles/concurrent/benchmarks.png) |
+| **constant** | Sustained rate (requests per second) testing | [CSV](profiles/constant/benchmarks.csv) \| [JSON](profiles/constant/benchmarks.json) \| [HTML Report](profiles/constant/benchmarks.html) \| [Chart (PNG)](profiles/constant/benchmarks.png) |
+| **poisson** | Probabilistic Poisson traffic distribution | [CSV](profiles/poisson/benchmarks.csv) \| [JSON](profiles/poisson/benchmarks.json) \| [HTML Report](profiles/poisson/benchmarks.html) \| [Chart (PNG)](profiles/poisson/benchmarks.png) |
+| **sweep** | Multi-strategy adaptive rate interpolation sweep | [CSV](profiles/sweep/benchmarks.csv) \| [JSON](profiles/sweep/benchmarks.json) \| [HTML Report](profiles/sweep/benchmarks.html) \| [Chart (PNG)](profiles/sweep/benchmarks.png) |
+
 ---
 *Report generated by guidellm-benchmark skill.*
 EOF
 
   echo "============================================================"
   echo "Benchmark Run Complete!"
-  echo "Launch Config saved at: ${LAUNCH_CONFIG_FILE}"
-  echo "Report generated at:    ${REPORT_FILE}"
+  echo "Report generated at: ${REPORT_FILE}"
   echo "============================================================"
 fi

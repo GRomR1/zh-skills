@@ -1,23 +1,60 @@
-# GuideLLM Benchmark Report Template & Guidelines
+# GuideLLM Report Template & Guidelines
 
-This reference details the structure and composition of the benchmark report generated after running GuideLLM against an inference server.
+Structure for `REPORT.md`, plus the exact launch-metadata templates both orchestrator scripts write next to the measurements.
 
-## Context Preservation Rule
+## Context Rule
 
-> **CRITICAL**: The generated `REPORT.md` must **NEVER** inline raw benchmark numbers, large metrics tables, full JSON dumps, or per-request latency distributions into the agent context.
->
-> Inlining raw measurements pollutes the LLM context window with hundreds of tokens of tabular numbers that are difficult for LLMs to retain and irrelevant to architectural decisions.
->
-> The report MUST contain:
-> 1. Target model identity and endpoint information.
-> 2. Serving container parameters (from `docker inspect` or `nerdctl inspect`).
-> 3. Relative file paths / links to the generated CSV, JSON, HTML, and PNG artifacts.
+The report must **never** contain raw measurement datasets: CSV rows, full `benchmarks.json` dumps, per-request latency distributions. Those pollute the LLM context and belong behind file links.
+
+What the report **must** contain:
+
+1. Model identity (`model_info.json` link + resolved id) and endpoint.
+2. How the serving container was launched: image, full server-command args, and links to `serving_launch_info.txt` / `serving_container_inspect.json`.
+3. Artifact link table with relative paths.
+4. How-to-read notes (completion vs errored vs incomplete).
+5. **Allowed exception**: a small hand-curated aggregate table (peak tok/s / saturation per workload, per-run completion summary) appended after the run — that is the conclusion of the analysis, not raw data.
 
 ---
 
-## Standard Report Template
+## Launch-metadata inspect template
 
-```markdown
+Written by both scripts to `serving_launch_info.txt` (works with `docker inspect --format` and `nerdctl inspect --format`):
+
+```text
+IMAGE: {{.Config.Image}}
+ENTRYPOINT: {{json .Config.Entrypoint}}
+CMD: {{json .Config.Cmd}}
+MOUNTS:
+{{range .Mounts}}  {{.Source}} -> {{.Destination}} ({{.Mode}})
+{{end}}DEVICES:
+{{range .HostConfig.Devices}}  {{.PathOnHost}} -> {{.PathInContainer}} {{.CgroupPermissions}}
+{{end}}PORTS:
+{{range $p, $b := .NetworkSettings.Ports}}  {{$p}} -> {{$b}}
+{{end}}ENV:
+{{range .Config.Env}}  {{.}}
+{{end}}GROUP_ADD:
+  {{.HostConfig.GroupAdd}}
+SECURITY_OPT:
+  {{.HostConfig.SecurityOpt}}
+ULIMITS:
+  {{range .HostConfig.Ulimits}}  {{.Name}}={{.Soft}}:{{.Hard}}
+{{end}}CAP_ADD:
+  {{.HostConfig.CapAdd}}
+=== MODEL CHECK (tokenizer/model source: <host-models-dir>) ===
+<directory listing from `ls -la` of the host models dir>
+```
+
+Alongside it, the scripts save:
+- `model_info.json` — raw `GET <endpoint>/v1/models`.
+- `serving_container_inspect.json` — verbatim full `inspect` (JSON array) as fallback ground truth.
+
+If no runtime can see the container, the scripts write a `(container inspect unavailable: ...)` placeholder instead of failing the run.
+
+---
+
+## Standard report template (all-profile run)
+
+~~~~markdown
 # LLM Benchmark Environment & Measurement Report
 
 - **Run Start Time**: YYYY-MM-DD HH:MM:SS
@@ -30,82 +67,76 @@ This reference details the structure and composition of the benchmark report gen
 
 ---
 
-## 1. Serving Environment & Framework Attributes
+## 1. Serving Environment & Launch Configuration
 
-### Model & Endpoint
-- **Resolved Model ID**: `<model_id>`
-- **Endpoint URL**: `http://<host>:<port>`
 - **Model Info JSON**: [`model_info.json`](model_info.json)
-- **Model Launch Configuration**: [`launch_config.json`](launch_config.json)
+- **Launch configuration (image/entrypoint/server args, mounts, devices,
+  ports, env, groups, ulimits, model-dir listing)**:
+  [`serving_launch_info.txt`](serving_launch_info.txt)
+- **Full Container Inspection**: [`serving_container_inspect.json`](serving_container_inspect.json)
 
-### Model Launch Configuration (`launch_config.json`)
-
-A clean, machine-readable JSON snapshot of the serving model configuration, GPU allocations, and runtime parameters:
+Server command, if you want it inline (this is environment metadata,
+not raw metrics — inline it):
 
 ```json
-{
-  "model": "/models/Qwen3.8-27B-FP8",
-  "served_model_name": "qwen-27b",
-  "port": 8000,
-  "kv_cache_dtype": "fp8",
-  "tensor_parallel_size": 1,
-  "distributed_executor_backend": "mp",
-  "trust_remote_code": true,
-  "gpu_memory_utilization": 0.90,
-  "max_model_len": 32768,
-  "max_num_seqs": 256,
-  "enable_chunked_prefill": true,
-  "no_enable_prefix_caching": true,
-  "devices": ["/dev/alixpu", "/dev/alixpu_ctl", "/dev/alixpu_ppu2"],
-  "ppu_assignment": "ppu2",
-  "shm_size": "128g",
-  "container_image": "asllm:2.0.0-pytorch2.10.0-ubuntu24.04-sail2.1.0-cuda13.0-sglang0.5.13-vllm0.23.0-py312",
-  "container_name": "qwen27b-fp8-tp1",
-  "runtime": "nerdctl"
-}
+["vllm","serve","/models/<model>","--max-num-seqs","128", "..."]
 ```
-### Container Configuration (from `<runtime> inspect`)
-- **Serving Image**: `<serving_image_tag>`
-- **Container Command / Arguments**:
-\`\`\`json
-[
-  "python",
-  "-m",
-  "vllm.entrypoints.openai.api_server",
-  "--model", "/models/Qwen3.8-27B",
-  "--tensor-parallel-size", "2",
-  "--gpu-memory-utilization", "0.90",
-  "--max-model-len", "24576"
-]
-\`\`\`
-- **Hardware Devices**:
-\`\`\`json
-[
-  {"PathOnHost": "/dev/alixpu", "PathInContainer": "/dev/alixpu"},
-  {"PathOnHost": "/dev/alixpu_ppu0", "PathInContainer": "/dev/alixpu_ppu0"},
-  {"PathOnHost": "/dev/alixpu_ppu1", "PathInContainer": "/dev/alixpu_ppu1"}
-]
-\`\`\`
-- **Storage Mounts**:
-\`\`\`json
-[
-  {"Source": "/bmcp_lvm_fs/cusa/models", "Destination": "/models", "Mode": "rw"}
-]
-\`\`\`
-- **Full Container Inspection**: [`serving_container_inspect.json`](serving_container_inspect.json)
 
 ---
 
 ## 2. Benchmark Measurement Artifacts
 
-> **Notice**: To avoid context pollution, raw measurement datasets, metrics, and logs are not loaded into this report. Access individual files below for visualization and analysis.
+> Raw measurements are not loaded here. Open the linked files to analyze.
 
-| Profile | Profile Description | Generated Artifacts (Links) |
+| Profile | Description | Artifacts |
 |---|---|---|
-| **synchronous** | Sequential requests measuring baseline latency | [CSV](profiles/synchronous/benchmarks.csv) \| [JSON](profiles/synchronous/benchmarks.json) \| [HTML Report](profiles/synchronous/benchmarks.html) \| [Chart (PNG)](profiles/synchronous/benchmarks.png) |
-| **throughput** | Peak throughput discovery with parallel workers | [CSV](profiles/throughput/benchmarks.csv) \| [JSON](profiles/throughput/benchmarks.json) \| [HTML Report](profiles/throughput/benchmarks.html) \| [Chart (PNG)](profiles/throughput/benchmarks.png) |
-| **concurrent** | Multi-stream parallel load testing | [CSV](profiles/concurrent/benchmarks.csv) \| [JSON](profiles/concurrent/benchmarks.json) \| [HTML Report](profiles/concurrent/benchmarks.html) \| [Chart (PNG)](profiles/concurrent/benchmarks.png) |
-| **constant** | Sustained rate (requests per second) testing | [CSV](profiles/constant/benchmarks.csv) \| [JSON](profiles/constant/benchmarks.json) \| [HTML Report](profiles/constant/benchmarks.html) \| [Chart (PNG)](profiles/constant/benchmarks.png) |
-| **poisson** | Probabilistic Poisson traffic distribution | [CSV](profiles/poisson/benchmarks.csv) \| [JSON](profiles/poisson/benchmarks.json) \| [HTML Report](profiles/poisson/benchmarks.html) \| [Chart (PNG)](profiles/poisson/benchmarks.png) |
-| **sweep** | Multi-strategy adaptive rate interpolation sweep | [CSV](profiles/sweep/benchmarks.csv) \| [JSON](profiles/sweep/benchmarks.json) \| [HTML Report](profiles/sweep/benchmarks.html) \| [Chart (PNG)](profiles/sweep/benchmarks.png) |
+| **synchronous** | Sequential baseline latency | [CSV](profiles/synchronous/benchmarks.csv) \| [JSON](profiles/synchronous/benchmarks.json) \| [HTML](profiles/synchronous/benchmarks.html) \| [PNG](profiles/synchronous/benchmarks.png) |
+| **throughput** | Peak concurrency discovery | [CSV](...) \| [JSON](...) \| [HTML](...) \| [PNG](...) |
+| **concurrent** | Multi-stream load | ... |
+| **constant** | Fixed request rate | ... |
+| **poisson** | Probabilistic arrivals | ... |
+| **sweep** | Adaptive multi-strategy sweep | ... |
+~~~~
+
+---
+
+## Sweep report template (streams × workload matrix)
+
+Generated by `scripts/guidellm_concurrency_sweep.sh` into
+`guidellm_sweep_YYYYMMDD_HHMMSS/REPORT.md`:
+
+~~~~markdown
+# GuideLLM Concurrency Sweep Report — <model_id>
+
+- **Run Start** / **Run directory** / **Target endpoint**
+- **Model id (from /v1/models)** / **Serving container** (runtime used to inspect)
+- **Serving image** / **GuideLLM image** / **Container runtime**
+- **Tokenizer (synthetic prompts)** / **Streams sweep** / **Total runs**
+
+## Server launch arguments (from container CMD)
+```json
+[full Cmd array]
 ```
+
+## Workload durations
+| Workload | Prompt → Output | Window |
+|---|---|---|
+| quick_256_128 | 256 → 128 | 180 s |
+| ... | ... | ... |
+
+## Model & launch metadata (captured with the measurements)
+- model_info.json / serving_launch_info.txt / serving_container_inspect.json links
+
+## How to read the results
+(completion = successful/total; incomplete = oversaturation signature,
+not failure; errored must be 0)
+
+## Artifacts          → profiles/<workload>_stream_<N>/ links
+## GPU telemetry      → guidellm_gputelemetry/metrics.csv link
+## Append after the run: aggregate summary table + incident log
+~~~~
+
+Per-run directories are `profiles/<workload>_stream_<N>/` each containing
+`benchmarks.{csv,json,html,png}`. See
+[example-sweep-qwen38-27b.md](example-sweep-qwen38-27b.md) for a finished
+report of this shape.

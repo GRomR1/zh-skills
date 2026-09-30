@@ -120,7 +120,7 @@ Constraints govern when each strategy stops:
 
 | Constraint | Syntax | Description |
 |---|---|---|
-| `max_duration` | `--constraint kind=max_duration,seconds=180` | Stop strategy after N elapsed seconds (recommend 180–300s for 8k->1k, 60s for smoke). |
+| `max_duration` | `--constraint kind=max_duration,seconds=60` | Stop strategy after N elapsed seconds. |
 | `max_requests` | `--constraint kind=max_requests,count=500` | Stop strategy after N requests are processed. |
 | `over_saturation` | `--constraint kind=over_saturation,min_seconds=30` | Auto-abort if server latency explodes due to saturation. |
 
@@ -139,29 +139,32 @@ Selecting realistic prompt and output token lengths is critical for representati
 
 ---
 
-## Duration Constraints & Statistical Validity
+## Concurrency Sweep Methodology
 
-A common pitfall in LLM load testing is choosing a `--duration` that is too short relative to single-request decode time.
+What `scripts/guidellm_concurrency_sweep.sh` does beyond a single `concurrent` run, and why it is shaped that way.
 
-### Mathematical Basis
+### The matrix
 
-1. **Decode Time per Request**:
-   $$\text{Request Latency} \approx \text{TTFT} + \frac{\text{Output Tokens}}{\text{Decode Throughput per Stream}}$$
-   For a 27B model generating 1,024 tokens at 30 tokens/sec:
-   $$\text{Request Latency} \approx 1.5\text{s} + \frac{1024}{30} \approx 35.6\text{ seconds}$$
+- **Workloads × streams**: 4 token shapes (table above) × stream steps `1 4 8 16 32 64 128` → 28 runs. Streams go up to the serving `--max-num-seqs` (e.g. 128), so the top step probes genuine server admission rather than client-side throttling.
+- **One config YAML per workload** (`guidellm_concurrent_<name>.yaml`) holds backend, tokenizer, data, window constraint and outputs; only `--profile kind=concurrent,streams=N` is overridden from the CLI per run. The tokenizer must be a real HF path mounted into the GuideLLM container (`-v <host-models>:/models:ro`) so synthetic token counts match the served tokenizer.
 
-2. **Ramp-up Penalty**:
-   GuideLLM applies a 10-second concurrency ramp-up (`rampup_duration=10`) in rate and concurrent profiles.
+### Per-workload windows (not one global duration)
 
-3. **Sample Count at 60 Seconds**:
-   $$\text{Usable Duration} = 60\text{s} - 10\text{s} = 50\text{s}$$
-   $$\text{Completed Requests per Stream} = \left\lfloor \frac{50\text{s}}{35.6\text{s}} \right\rfloor = 1$$
-   - Sequential (`synchronous`) profile completes exactly **1 request** before timeout ($N=1$).
-   - Percentiles (P90, P99), latency jitter, and standard deviation are mathematically unreliable with $N \le 2$.
+| Workload | Window | Why |
+|---|---|---|
+| quick_256_128 | 180 s | Tiny requests; even 128 streams drain fast |
+| chat_2k_512 | 420 s | Moderate output × high streams needs room |
+| reasoning_4k_2k | 600 s | 2048 output tokens dominate; few requests fit in a short window |
+| 8k_1k | 600 s | Heavy prefill + queue growth; TTFT at 128 streams can exceed 4 minutes |
 
-### Recommendations
+A uniform short window causes the real failure mode: requests still in flight
+at cutoff become `incomplete`, and the latency stats of the survivors are
+biased low ("survivorship"). The sweep's resume logic (skip only
+`errored==0 && completion>=90%`) is what makes re-running with longer windows
+cheap — finished short-window runs stay, incomplete-heavy ones get re-measured.
 
-- **Smoke Test (`--duration 60` or `--preset quick`)**: Useful solely to verify container image pulling, host network loopback access, memory stability, and report generation.
-- **Production Benchmark (`--duration 180` to `300`)**: Standard for 8k $\to$ 1k workloads. Provides 6–10 completed requests per stream, stable KV-cache warmup, and reproducible P50/P90/P99 latency metrics.
-- **Fast Iteration Alternative (`-o 256 -d 90`)**: Reducing output tokens to 256 allows requests to finish in ~8–10 seconds, yielding statistically meaningful sample counts in under 2 minutes.
-- **Multi-Strategy Sweep Multiplier**: The `sweep` profile runs 6 strategies sequentially. Total time for `sweep` will equal $6 \times \text{duration}$ (e.g. ~18 minutes at 180s, ~30 minutes at 300s).
+### Interpreting sweep outputs
+
+- Falling `completion` at high streams marks the **saturation point**, not a regression; the guide used for the example sweep is "first median TTFT > 10 s".
+- `errored > 0` in any row is a real incident (engine crash, transport error) — recover the server and re-run with `SWEEP_RUN_DIR` to replace just those rows.
+- GPU telemetry (`mx-smi` 1 Hz) runs for the whole sweep, so individual runs can be correlated by wall-clock placement of their directories' mtime window.

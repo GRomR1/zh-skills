@@ -1,206 +1,144 @@
 ---
-name: guidellm-benchmark
-description: Benchmark LLM inference endpoints (vLLM, SGLang, etc.) with GuideLLM using nerdctl or docker containers and image ghcr.io/vllm-project/guidellm:latest. Executes all load profiles (synchronous, throughput, concurrent, constant, poisson, sweep) against a model endpoint, exports results in csv, json, html, png to a timestamped folder, and generates an environment and model metadata report linking to benchmark runs without loading raw metrics into context.
+description: Benchmark LLM inference endpoints (vLLM, SGLang, etc.) with GuideLLM using docker or nerdctl containers and image ghcr.io/vllm-project/guidellm:latest. Two bundled orchestrators — a concurrency sweep (4 workload shapes x streams 1..128 with per-workload windows, resumable re-runs, and mx-smi GPU telemetry) and an all-profile runner (synchronous, throughput, concurrent, constant, poisson, sweep). Every run also captures model identity and how the serving container was launched (full inspect plus mounts/devices/ports/env/ulimits/server-args and model-dir listing) into a timestamped folder with csv, json, html, png artifacts and a REPORT.md of links — raw metrics are never loaded into context. Use this skill whenever the user mentions GuideLLM or guidellm, load/throughput benchmarks, latency (TTFT/TPOT) measurements, concurrency sweeps, tok/s vs streams, capacity or saturation testing of an OpenAI-compatible server, GPU telemetry during benchmarks — even if GuideLLM is not named explicitly.
 license: MIT
+name: guidellm-benchmark
 ---
-
 # guidellm-benchmark
 
-Run comprehensive load and performance benchmarks against OpenAI-compatible LLM servers (e.g. vLLM, SGLang) using GuideLLM containerized via `nerdctl` or `docker`.
+Run comprehensive load and performance benchmarks against OpenAI-compatible LLM servers (e.g. vLLM, SGLang) using GuideLLM containerized via `docker` or `nerdctl`, and record not only measurements but also **which model exactly** was served and **how the serving container was launched** — benchmark numbers are meaningless a week later without the server args (quantization, `max-num-seqs`, prefix caching, context length...) that produced them.
 
 ## Overview
 
-- **Image**: `ghcr.io/vllm-project/guidellm:latest`
-- **Runtimes Supported**: `nerdctl` (containerd) or `docker`
-- **Network Mode**: `--network host` (allows connecting directly to localhost endpoints)
-- **Profiles Executed**: All standard load profiles (`synchronous`, `throughput`, `concurrent`, `constant`, `poisson`, `sweep`)
-- **Default Artifact Formats**: `csv`, `json`, `html`, `png`
-- **Artifact Destination**: Dedicated timestamped folder in current working directory: `guidellm_run_YYYYMMDD_HHMMSS`
-- **Context Protection**: The generated report contains model parameters, container inspection data, and relative links to measurement files. It does **not** inline raw benchmark numbers, preventing LLM context pollution.
+- **GuideLLM Image**: `ghcr.io/vllm-project/guidellm:latest`
+- **Runtimes**: `docker` or `nerdctl` (both supported by both orchestrator scripts; serving-container inspect automatically falls back to the other runtime)
+- **Network Mode**: `--network host` (GuideLLM reaches localhost endpoints directly)
+- **Bundled orchestrators**:
+  - `scripts/guidellm_concurrency_sweep.sh` — capacity/saturation study: 4 workload shapes × stream sweep (1..128), per-workload time windows, `mx-smi` GPU telemetry for the whole run, resumable re-runs
+  - `scripts/run_benchmarks.sh` — full load-profile matrix (all 6 GuideLLM profiles), workload token presets, `--dry-run`
+- **Artifacts**: `csv`, `json`, `html`, `png` per run + `REPORT.md` index of relative links
+- **Output folders** (created in the current working directory): `guidellm_run_YYYYMMDD_HHMMSS/` (all-profile runner) or `guidellm_sweep_YYYYMMDD_HHMMSS/` (concurrency sweep)
+- **Metadata captured with every run**: `model_info.json` (endpoint `/v1/models`), `serving_launch_info.txt` (human-readable inspect: image, entrypoint, server args, mounts, devices, ports, env, groups, security opts, ulimits, caps, model-dir listing), `serving_container_inspect.json` (full dump)
+- **Context protection**: `REPORT.md` holds environment/launch metadata and relative links; raw benchmark rows and per-request distributions stay in the artifact files and are never dumped into chat.
 
 ---
 
-## Quick Start (Automated Script)
+## Quick Start
 
-Use the bundled orchestrator script in `scripts/run_benchmarks.sh`:
+### Option A — Concurrency sweep (capacity & saturation)
+
+Reproduces the full streams×workload matrix in one command (defaults match the production layout: serving container `vllm-qwen38-27b-w8a8`, endpoint `http://localhost:8000`, models/configs/telemetry dirs under the metax-vllm repo):
 
 ```bash
-# Basic run against local server on port 8000 (standard 8k->1k, 180s duration)
-bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
-  --endpoint http://localhost:8000 \
-  --container <serving_container_name_or_id> \
-  --runtime nerdctl
+# Fresh sweep (GuideLLM via docker)
+bash .agents/skills/guidellm-benchmark/scripts/guidellm_concurrency_sweep.sh
 
-# Fast smoke test (60s duration, 256->128 tokens)
-bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
-  --endpoint http://localhost:8000 \
-  --preset quick
+# GuideLLM via nerdctl instead (inspect of the serving container auto-falls-back)
+RUNTIME=nerdctl bash .agents/skills/guidellm-benchmark/scripts/guidellm_concurrency_sweep.sh
 
-# Run specific profile (default is sweep; options: sweep, concurrent, synchronous, throughput, constant, poisson, all)
-bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
-  --endpoint http://localhost:8000 \
-  --container <serving_container_name_or_id> \
-  --profile sweep
+# Resume/interrupt-safe re-run: skips profiles that already finished with
+# 0 errors and >=90% completion, re-measures everything else
+SWEEP_RUN_DIR=./guidellm_sweep_20260924_223015 \
+  bash .agents/skills/guidellm-benchmark/scripts/guidellm_concurrency_sweep.sh
 
-# Bundle an explicit model launch configuration
-bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
-  --endpoint http://localhost:8000 \
-  --container <serving_container_name_or_id> \
-  --launch-config ./launch_config.json
+# Different target / narrower stream grid
+SERVING_CONTAINER=<other-name> ENDPOINT=http://localhost:8011 \
+  HOST_MODELS_DIR=/path/to/models SWEEP_STREAMS="1 4 16 64" \
+  bash .agents/skills/guidellm-benchmark/scripts/guidellm_concurrency_sweep.sh
 
-# Run with workload presets:
-#   8k-1k (default RAG/Agentic: 8192 prompt -> 1024 output)
-#   chat (Conversational: 2048 prompt -> 512 output)
-#   reasoning (Deep reasoning: 4096 prompt -> 2048 output)
-#   quick (Smoke test: 256 prompt -> 128 output)
-bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
-  --endpoint http://localhost:8000 \
-  --preset chat
-
-# Dry-run to preview commands without executing
-bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
-  --endpoint http://localhost:8000 \
-  --dry-run
+# Long non-interactive run: survive terminal/session teardown (a previous
+# run was killed by SIGHUP when the launching shell exited)
+setsid bash .agents/skills/guidellm-benchmark/scripts/guidellm_concurrency_sweep.sh \
+  </dev/null >sweep.log 2>&1 &
 ```
 
-### Workload Sizing & Presets
+Sweep matrix: workloads `8k_1k` (8192→1024) · `chat_2k_512` (2048→512) · `reasoning_4k_2k` (4096→2048) · `quick_256_128` (256→128) × streams `1 4 8 16 32 64 128` (= 28 runs), with windows **180 s (quick) / 420 s (chat) / 600 s (reasoning, 8k)**. Results land in `guidellm_sweep_*/profiles/<workload>_stream_<N>/`.
 
-Realistic modern benchmarks in 2026 reflect agentic, RAG, and multi-turn workflows where prompt tokens dominate:
+### Option B — All load profiles
 
-| Preset | Prompt Tokens | Output Tokens | Default Duration | Use Case |
-|---|---|---|---|---|
-| `8k-1k` *(default)* | 8,192 | 1,024 | 180s | Standard production RAG and agentic workflows |
-| `chat` | 2,048 | 512 | 120s | Conversational chat with moderate history |
-| `reasoning` | 4,096 | 2,048 | 240s | Extended reasoning / Chain-of-Thought models |
-| `quick` | 256 | 128 | 60s | Smoke testing container, network, and endpoint connectivity |
+```bash
+# Full profile matrix against a local server
+bash .agents/skills/guidellm-benchmark/scripts/run_benchmarks.sh \
+  --endpoint http://localhost:8000 \
+  --container <serving_container_name_or_id> \
+  --runtime docker \
+  --models-dir "$PWD/models" \
+  --duration 60
 
-### Duration & Statistical Validity Guidelines
+# Workload token presets:
+#   8k-1k (default: RAG/Agentic 8192 -> 1024)   chat (2048 -> 512)
+#   reasoning (4096 -> 2048)                    quick (256 -> 128)
+bash .agents/skills/guidellm-benchmark/scripts/run_benchmarks.sh --preset chat
 
-Choosing an adequate benchmark duration (`--duration` / `max_duration`) is essential for statistical convergence:
+# Preview every command without executing anything
+bash .agents/skills/guidellm-benchmark/scripts/run_benchmarks.sh --dry-run
+```
 
-1. **Generation Latency Physics**:
-   - For a 27B model on 1–2 PPUs, decode throughput is typically **25–40 tokens/sec** per stream.
-   - Generating **1,024 output tokens** requires **~25–40 seconds** per individual request.
-   - GuideLLM applies an initial 10-second concurrency ramp-up (`rampup_duration=10`).
+### Workload presets
 
-2. **Why 60 seconds is insufficient for 8k $\to$ 1k**:
-   - In 60 seconds, each parallel stream can complete **only 1 or at most 2 requests**.
-   - In the sequential `synchronous` profile, exactly **one** request completes before the deadline ($N=1$).
-   - Percentiles (P50, P90, P99), latency jitter, and steady-state throughput cannot be accurately computed from 1–2 samples.
+| Preset | Prompt Tokens | Output Tokens | Use Case |
+|---|---|---|---|
+| `8k-1k` *(default)* | 8,192 | 1,024 | Standard RAG, document Q&A, agentic workflows — heavy prefill, KV pressure |
+| `chat` | 2,048 | 512 | Conversational chat with short history |
+| `reasoning` | 4,096 | 2,048 | Long-form thinking / reasoning models |
+| `quick` | 256 | 128 | Smoke testing container and network connectivity |
 
-3. **Recommended Duration Guidelines**:
-   - **Smoke Test (`--duration 60` or `--preset quick`)**: Verifies container launch, GPU memory stability, absence of OOM, and report generation.
-   - **Statistically Valid Benchmark (`--duration 180` to `300`)**: Standard for 8k $\to$ 1k. Allows 6–10 completed requests per stream, stable KV-cache warmup, and tight latency percentiles.
-   - **Fast Alternative (`--preset chat` or `-o 256 -d 90`)**: Reduces decode time to 8–12 seconds per request, providing high sample counts in 90–120 seconds.
+Window sizing rule for sweeps: the heavier the workload and the higher the streams, the longer the window must be — if most requests are still in flight at cutoff they count as `incomplete` and the surviving samples bias the latency stats. The defaults above (180/420/600 s) came from exactly that failure at a uniform 180 s.
 
-4. **Time Budgeting for the `sweep` Profile**:
-   - GuideLLM's `sweep` profile executes 6 sub-strategies in sequence (baseline sync + peak throughput + 4 interpolated rate steps).
-   - The `max_duration` applies **per sub-strategy**. Total execution time for `sweep` alone is $\approx 6 \times \text{duration}$ (e.g. ~18 minutes at `--duration 180`, ~6 minutes at `--duration 60`).
 ---
 
-## Manual Execution Workflow
+## Choosing the container runtime (docker vs nerdctl)
 
-If running commands directly or adapting to custom pipelines, follow this step-by-step workflow:
+- Both orchestrators invoke GuideLLM as `$RUNTIME run --rm --network host -v <results>:/results:rw ...`; docker and nerdctl accept the same flags here.
+- `run_benchmarks.sh` auto-detects (`nerdctl` if on PATH, else `docker`), `--runtime` / `RUNTIME=` overrides; the sweep script defaults to `docker`.
+- **The serving container is independent**: it may run under the other runtime than the one you pick for GuideLLM. Both scripts therefore probe the chosen runtime first and fall back to the other for the serving-container inspect — one of them will see the container as long as it is running.
+- Ensure the chosen runtime can pull/run `ghcr.io/vllm-project/guidellm:latest` (image presence is per-runtime).
 
-### 1. Initialize Timestamped Run Directory
+---
 
-Create a timestamped directory in the current working directory:
+## What gets captured alongside the measurements
+
+Right after the run directory is created (before any benchmark), and **before** the long sweep starts, both scripts save:
+
+| File | Content |
+|---|---|
+| `model_info.json` | `GET /v1/models` — the model id the endpoint actually serves |
+| `serving_launch_info.txt` | `IMAGE`, `ENTRYPOINT`, `CMD` (full server args), `MOUNTS`, `DEVICES`, `PORTS`, `ENV`, `GROUP_ADD`, `SECURITY_OPT`, `ULIMITS`, `CAP_ADD`, then `=== MODEL CHECK ===` listing the host model dir (weights/tokenizer source) |
+| `serving_container_inspect.json` | Verbatim full output of `<runtime> inspect <container>` — the ground truth if the template misses a field |
+| `REPORT.md` | Environment summary (model id, image, server args, durations, runtime) + relative links to metadata, artifacts and telemetry — never raw metric dumps |
+| `guidellm_gputelemetry/metrics.csv` | (sweep only) `mx-smi` at 1 Hz: memory, utilization, temperature, power, for the whole sweep |
+
+Capturing launch info up-front matters for two reasons: a sweep can die hours in (took down a prior run via SIGHUP), and identical model weights served with different `max-num-seqs` / `--no-enable-prefix-caching` / quant flags produce completely different curves. The launch template is defined verbatim in `references/report-template.md`.
+
+---
+
+## Manual execution workflow
+
+If you need a single ad-hoc run instead of the orchestrators:
+
+### 1. Timestamped run directory + metadata
 
 ```bash
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 RUN_DIR="guidellm_run_${TIMESTAMP}"
-mkdir -p "${RUN_DIR}/profiles/"{synchronous,throughput,concurrent,constant,poisson,sweep}
-```
-
-### 2. Inspect Serving Model & Container
-
-Collect environment attributes and metadata to include in the final report:
-
-```bash
-# Query model name from endpoint
+mkdir -p "${RUN_DIR}/profiles"
 curl -s http://localhost:8000/v1/models > "${RUN_DIR}/model_info.json"
-MODEL_ID=$(jq -r '.data[0].id' "${RUN_DIR}/model_info.json")
-
-# Inspect the serving container (nerdctl or docker)
-RUNTIME="nerdctl" # or docker
-CONTAINER="<serving_container_name>"
-$RUNTIME inspect "$CONTAINER" > "${RUN_DIR}/serving_container_inspect.json"
-
-# Save structured model launch configuration (launch_config.json)
-cat > "${RUN_DIR}/launch_config.json" << 'EOF'
-{
-  "model": "/models/Qwen3.8-27B-FP8",
-  "served_model_name": "qwen-27b",
-  "port": 8000,
-  "kv_cache_dtype": "fp8",
-  "tensor_parallel_size": 1,
-  "distributed_executor_backend": "mp",
-  "trust_remote_code": true,
-  "gpu_memory_utilization": 0.90,
-  "max_model_len": 32768,
-  "max_num_seqs": 256,
-  "enable_chunked_prefill": true,
-  "no_enable_prefix_caching": true,
-  "devices": ["/dev/alixpu", "/dev/alixpu_ctl", "/dev/alixpu_ppu2"],
-  "ppu_assignment": "ppu2",
-  "shm_size": "128g",
-  "container_image": "asllm:2.0.0-pytorch2.10.0-ubuntu24.04-sail2.1.0-cuda13.0-sglang0.5.13-vllm0.23.0-py312",
-  "container_name": "qwen27b-fp8-tp1",
-  "runtime": "nerdctl"
-}
-EOF
-```
-Extract key attributes for the report:
-- Container image tag
-- Command arguments (e.g. `--model`, `--tensor-parallel-size`, `--gpu-memory-utilization`, `--max-model-len`, `--dtype`)
-- Mapped hardware devices (`/dev/alixpu*`, `/dev/nvidia*`)
-- Volume mounts and IPC configuration
-
-### 3. Execute GuideLLM Container for Each Profile
-
-Run each profile using the container image. Note that the container entrypoint is `guidellm`, so the first argument passed must be `run`:
-
-#### A. Synchronous Profile (Baseline Sequential Latency)
-```bash
-$RUNTIME run --rm --network host \
-  -v "$(pwd)/${RUN_DIR}/profiles/synchronous:/results:rw" \
-  ghcr.io/vllm-project/guidellm:latest \
-  run \
-  --backend kind=openai_http,target=http://localhost:8000 \
-  --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
-  --constraint kind=max_duration,seconds=180 \
-  --profile kind=synchronous \
-  --output kind=csv,path=/results/benchmarks.csv \
-  --output kind=json,path=/results/benchmarks.json \
-  --output kind=html,path=/results/benchmarks.html \
-  --output kind=plot,path=/results/benchmarks.png
+docker inspect <serving_container> --format '<launch template>' \
+  > "${RUN_DIR}/serving_launch_info.txt"   # template: references/report-template.md
+docker inspect <serving_container> > "${RUN_DIR}/serving_container_inspect.json"
 ```
 
-#### B. Throughput Profile (Peak Capacity)
-```bash
-$RUNTIME run --rm --network host \
-  -v "$(pwd)/${RUN_DIR}/profiles/throughput:/results:rw" \
-  ghcr.io/vllm-project/guidellm:latest \
-  run \
-  --backend kind=openai_http,target=http://localhost:8000 \
-  --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
-  --constraint kind=max_duration,seconds=180 \
-  --profile kind=throughput,max_concurrency=32,rampup_duration=10 \
-  --output kind=csv,path=/results/benchmarks.csv \
-  --output kind=json,path=/results/benchmarks.json \
-  --output kind=html,path=/results/benchmarks.html \
-  --output kind=plot,path=/results/benchmarks.png
-```
+### 2. Run GuideLLM once per profile
 
-#### C. Concurrent Profile (Fixed Parallel Streams)
+The image entrypoint is `guidellm`, so the container command **must** start with `run`:
+
 ```bash
-$RUNTIME run --rm --network host \
+docker run --rm --network host \
   -v "$(pwd)/${RUN_DIR}/profiles/concurrent:/results:rw" \
   ghcr.io/vllm-project/guidellm:latest \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
   --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
-  --constraint kind=max_duration,seconds=180 \
+  --constraint kind=max_duration,seconds=600 \
   --profile kind=concurrent,streams=16,rampup_duration=10 \
   --output kind=csv,path=/results/benchmarks.csv \
   --output kind=json,path=/results/benchmarks.json \
@@ -208,154 +146,69 @@ $RUNTIME run --rm --network host \
   --output kind=plot,path=/results/benchmarks.png
 ```
 
-#### D. Constant Rate Profile (Sustained Request Rate)
+Profile flags (swap the `--profile` line, everything else stays):
+
+| Profile | `--profile` argument |
+|---|---|
+| synchronous | `kind=synchronous` |
+| throughput | `kind=throughput,max_concurrency=32,rampup_duration=10` |
+| concurrent | `kind=concurrent,streams=16,rampup_duration=10` |
+| constant | `kind=constant,rate=10,rampup_duration=10` |
+| poisson | `kind=poisson,rate=10` + `--seed kind=static,value=42` |
+| sweep | `kind=sweep,sweep_size=6,rampup_duration=10` |
+
+**Config-file mode** (what the sweep script uses): put backend/data/constraints/outputs in a YAML, mount the tokenizer/weights dir read-only, override only the profile per run:
+
 ```bash
-$RUNTIME run --rm --network host \
-  -v "$(pwd)/${RUN_DIR}/profiles/constant:/results:rw" \
+docker run --rm --network host \
+  -v "$MODELS:/models:ro" -v "$CFG.yaml:/tmp/w.yaml:ro" \
+  -v "$PROFILE_DIR:/results:rw" \
   ghcr.io/vllm-project/guidellm:latest \
-  run \
-  --backend kind=openai_http,target=http://localhost:8000 \
-  --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
-  --constraint kind=max_duration,seconds=180 \
-  --profile kind=constant,rate=10,rampup_duration=10 \
-  --output kind=csv,path=/results/benchmarks.csv \
-  --output kind=json,path=/results/benchmarks.json \
-  --output kind=html,path=/results/benchmarks.html \
-  --output kind=plot,path=/results/benchmarks.png
+  run --config /tmp/w.yaml --profile kind=concurrent,streams=64
 ```
 
-#### E. Poisson Profile (Probabilistic Arrivals)
-```bash
-$RUNTIME run --rm --network host \
-  -v "$(pwd)/${RUN_DIR}/profiles/poisson:/results:rw" \
-  ghcr.io/vllm-project/guidellm:latest \
-  run \
-  --backend kind=openai_http,target=http://localhost:8000 \
-  --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
-  --constraint kind=max_duration,seconds=180 \
-  --profile kind=poisson,rate=10 --seed kind=static,value=42 \
-  --output kind=csv,path=/results/benchmarks.csv \
-  --output kind=json,path=/results/benchmarks.json \
-  --output kind=html,path=/results/benchmarks.html \
-  --output kind=plot,path=/results/benchmarks.png
-```
+### 3. Generate `REPORT.md`
 
-#### F. Sweep Profile (Multi-Strategy Adaptive Sweep)
-```bash
-$RUNTIME run --rm --network host \
-  -v "$(pwd)/${RUN_DIR}/profiles/sweep:/results:rw" \
-  ghcr.io/vllm-project/guidellm:latest \
-  run \
-  --backend kind=openai_http,target=http://localhost:8000 \
-  --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
-  --constraint kind=max_duration,seconds=180 \
-  --profile kind=sweep,sweep_size=6,rampup_duration=10 \
-  --output kind=csv,path=/results/benchmarks.csv \
-  --output kind=json,path=/results/benchmarks.json \
-  --output kind=html,path=/results/benchmarks.html \
-  --output kind=plot,path=/results/benchmarks.png
-```
+Follow [references/report-template.md](references/report-template.md): header + server args + launch-metadata links + artifact link table + how-to-read notes. Do not inline raw measurement tables generated from CSV/JSON dumps; a small hand-curated aggregate summary (peak/saturation per workload) is fine.
 
 ---
 
-### 4. Generate the Summary Report
+## Reading a sweep's results
 
-Create `${RUN_DIR}/REPORT.md` linking to all run outputs. Follow the structure documented in [Report Template Reference](references/report-template.md):
+Parse `benchmarks.json` per profile (keys: `metrics.request_totals`, `requests_per_second`, `time_to_first_token_ms`, `time_per_output_token_ms`, `output_tokens_per_second`) with a small Python script that prints one aggregate row per run — not by dumping JSON into chat.
 
-1. **Header & Provenance**: Date, time, target URL, resolved model ID, runtime, and container ID.
-2. **Serving Environment**: Serving container image, hardware devices, mounts, and model launch arguments.
-3. **Artifact Links Table**: Relative links to each profile's CSV, JSON, HTML, and PNG artifacts.
-4. **Context Cleanliness**: Never inline raw measurement numbers, throughput tables, or per-request latency stats into the report.
-
----
-
-## Critical Rules & Troubleshooting
-
-### 1. Offline / Air-Gapped Environments (`[Errno 101] Network is unreachable`)
-
-**Symptom**:
-```
-urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='huggingface.co', port=443):
-Max retries exceeded with url: ... [Errno 101] Network is unreachable
-```
-
-**Root Cause**:
-GuideLLM by default tries to resolve and download the model tokenizer from Hugging Face for token counting and synthetic text generation. In isolated clusters or nodes without outbound internet access, this lookup immediately fails.
-
-**Solution**:
-Mount the host model directory into the GuideLLM container at `/model:ro` and point the tokenizer to that local directory with `trust_remote_code: true`:
-
-```bash
-# Using Docker/Nerdctl CLI flags:
--v /bmcp_lvm_fs/cusa/models/Qwen3.8-27B:/model:ro \
---tokenizer '{"kind":"huggingface_auto","model":"/model","load_kwargs":{"trust_remote_code":true}}'
-```
-
-Or via GuideLLM environment variables:
-```bash
-nerdctl run --rm --network host \
-  -v /bmcp_lvm_fs/cusa/models/Qwen3.8-27B:/model:ro \
-  -v "$(pwd)/results:/results:rw" \
-  -e GUIDELLM__SPEC__BACKEND='{"kind": "openai_http", "target": "http://localhost:8000", "model": "qwen3.8-27b"}' \
-  -e GUIDELLM__SPEC__PROFILE='{"kind": "sweep"}' \
-  -e GUIDELLM__SPEC__CONSTRAINTS='[{"kind": "max_duration", "seconds": 180}]' \
-  -e GUIDELLM__SPEC__DATA='[{"kind": "synthetic_text", "prompt_tokens": 8192, "output_tokens": 1024}]' \
-  -e GUIDELLM__SPEC__TOKENIZER='{"kind": "huggingface_auto", "model": "/model", "load_kwargs": {"trust_remote_code": true}}' \
-  ghcr.io/vllm-project/guidellm:latest
-```
-
-In `scripts/run_benchmarks.sh`, pass `--model-path`:
-```bash
-bash skills/guidellm-benchmark/scripts/run_benchmarks.sh \
-  --endpoint http://localhost:8000 \
-  --container qwen27b-fp8-tp1 \
-  --model-path /bmcp_lvm_fs/cusa/models/Qwen3.8-27B-FP8
-```
-*(Note: `run_benchmarks.sh` will also automatically detect the host model path from the container inspect JSON if `--container` is provided!)*
-
----
-### 2. Volume Permissions (`PermissionError: [Errno 13] Permission denied: '/results/benchmarks.json'`)
-
-**Symptom**:
-```
-PermissionError: [Errno 13] Permission denied: '/results/benchmarks.json'
-time="..." level=error msg="forward signal child exited" error="ttrpc: closed: unknown"
-```
-
-**Root Cause**:
-The GuideLLM container runs as unprivileged user `USER 1001:0`. When output directories on the host are created by `root` (or with default `umask 0755`), user `1001` has no write access inside the mounted `/results` volume.
-
-**Fixes Before Container Launch**:
-1. **World-writable directories (Recommended & built into `run_benchmarks.sh`)**:
-   ```bash
-   mkdir -p "${PROFILE_DIR}"
-   chmod 777 "${PROFILE_DIR}"
-   ```
-2. **Run container as root (`--user 0`)**:
-   ```bash
-   nerdctl run --rm --network host --user 0 -v "${PROFILE_DIR}:/results:rw" ...
-   ```
-3. **Match container UID/GID (`chown`)**:
-   ```bash
-   chown -R 1001:0 "${TARGET_DIR}"
-   ```
+- **Three counters**: `successful` / `errored` / `incomplete` (from `request_totals`).
+  - `completion = successful / total`. Requests still in flight at the window cutoff are `incomplete` — at high streams a falling completion rate is the signature of **oversaturation**, a measurement of where the queue stops draining, *not* a failure. A healthy sweep has `errored = 0` everywhere.
+  - Re-run mode uses exactly this: `errored == 0 && completion >= 0.90` → profile is "already good" and skipped.
+- **Saturation point** = first stream step where median TTFT jumps past ~10 s (pre-queued requests dominate).
+- **Single-stream rows** baseline decode: median TPOT ≈ per-token latency; output tok/s ≈ `output_tokens / TPOT`.
+- **GPU correlation**: overlay `guidellm_gputelemetry/metrics.csv` (1 Hz) on the timeline of a run to see utilization/memory/power at saturation.
+- Worked example with full tables — peaks, saturation points, per-run rows and the incidents log of the `guidellm_sweep_20260924_223015` run (Qwen3.8-27B-W8A8, 28 runs, 0 errors): [references/example-sweep-qwen38-27b.md](references/example-sweep-qwen38-27b.md).
 
 ---
 
-### 3. Container Subcommand
-Always pass `run` after `ghcr.io/vllm-project/guidellm:latest`. The image entrypoint is `/opt/app-root/bin/guidellm`; passing flags directly replaces the container command and causes command parse errors.
+## Reporting rule (protect the context)
 
-### 4. Network Mode
-Always specify `--network host` so the GuideLLM container can access services running on host loopback (`http://localhost:8000`).
+When reporting to the user: summary of environment + paths to `REPORT.md` + at most a few headline numbers (peak tok/s, saturation streams). Never paste CSV rows, full `benchmarks.json`, or per-request latency distributions into chat or the report — link them instead. Compact curated aggregate tables (like the example reference) are the only acceptable exception, and they belong appended to `REPORT.md`, not sent as chat walls of numbers.
 
-### 5. Output Formats
-Specify `--output` repeatedly for each required format (`csv`, `json`, `html`, `plot`). For PNG charts, use `--output kind=plot,path=/results/benchmarks.png`.
+---
 
-### 6. Preserving LLM Context
-When reporting completion to the user, present the summary of the environment and the paths to `REPORT.md` and the artifact files. Do not dump CSV rows or benchmark numbers into the chat.
+## Operational gotchas
+
+1. **Container subcommand**: always `run` before any GuideLLM flags — the entrypoint is `/opt/app-root/bin/guidellm`; bare flags replace the command and fail to parse.
+2. **Network**: always `--network host`, otherwise `localhost:8000` inside the container is not the host server.
+3. **Outputs**: repeat `--output kind=csv|json|html|plot,path=/results/...` (plot → PNG) and mount the profile dir `:rw`.
+4. **Long sweeps die with the terminal**: launch with `setsid ... </dev/null >log 2>&1 &` (SIGHUP hit a previous run and killed the orchestrator silently).
+5. **Resume, don't restart**: `SWEEP_RUN_DIR=<existing dir>` re-runs only failed/incomplete profiles — healthy 28-run sweeps re-check in seconds.
+6. **The server can die mid-sweep** (engine crash, GPU driver wedging — e.g. MetaX ringbuf exhaustion leaves a zombie worker when the container has no `--init`). The orchestrator only probes `/v1/models` between runs; it will not resurrect the container. Recovery: fix/recreate the serving container (prefer `--init` so workers get reaped), then resume with `SWEEP_RUN_DIR`. Record what happened as an incident note appended to `REPORT.md`.
+7. **`mx-smi` telemetry**: `mx-smi -t` cannot be combined with `-o file` — the script polls with `-l 1000` and is stopped by `kill <pid>`; only one collector per `guidellm_gputelemetry/metrics.csv` (re-run mode reuses a live collector instead of starting a second writer).
+8. **YAML configs are regenerated** at every sweep invocation (stale `guidellm_concurrent_*.yaml` cleaned first) — edits to them do not survive a re-run; change `YAML_MAP`/`DURATION_MAP` in the script instead.
+9. **GuideLLM needs no GPU**: weights are mounted `:ro`, the profile dir `:rw` — nothing else. It only talks HTTP to the endpoint, so no `/dev/*` or `shm_size` tuning applies to the benchmark container (those matter only for the serving side, see repo compose files for MetaX).
+
 ---
 
 ## Deep-Dive References
 
-- [GuideLLM Load Profiles Reference](references/profiles.md): In-depth mechanics of synchronous, throughput, concurrent, constant, poisson, and sweep profiles.
-- [Report Template & Guidelines](references/report-template.md): Detailed layout for the environment report and artifact link tables.
+- [GuideLLM Load Profiles Reference](references/profiles.md) — mechanics of synchronous/throughput/concurrent/constant/poisson/sweep profiles, constraints, workload sizing, and the concurrency-sweep methodology.
+- [Report Template & Guidelines](references/report-template.md) — `REPORT.md` layout, the launch-metadata inspect template, and sweep-report structure.
+- [Example sweep results (Qwen3.8-27B)](references/example-sweep-qwen38-27b.md) — a finished 28-run sweep: environment, per-workload peaks, saturation points, incidents.
