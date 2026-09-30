@@ -168,3 +168,8 @@ cheap — finished short-window runs stay, incomplete-heavy ones get re-measured
 - Falling `completion` at high streams marks the **saturation point**, not a regression; the guide used for the example sweep is "first median TTFT > 10 s".
 - `errored > 0` in any row is a real incident (engine crash, transport error) — recover the server and re-run with `SWEEP_RUN_DIR` to replace just those rows.
 - GPU telemetry (`mx-smi` 1 Hz) runs for the whole sweep, so individual runs can be correlated by wall-clock placement of their directories' mtime window.
+
+### Failure modes the orchestrator defends against
+
+- **Root-owned `/results`** — the profile dir is `mkdir -p`'d and `chmod 777`'d before `docker run`. A missing bind-mount target is auto-created root-owned by Docker, and the non-root GuideLLM container (uid 1001) then dies with `PermissionError: /results/benchmarks.csv`.
+- **Air-gapped tokenizer download** — the YAML sets `tokenizer: huggingface_auto` on the mounted model dir (`-v <host-models>:/models:ro`), so GuideLLM never reaches HuggingFace. Without it, output finalization fails with `httpx.ConnectError: [Errno 101] Network is unreachable` and `html`/`png` are lost (csv/json survive).

@@ -267,6 +267,10 @@ PYEOF
         fi
 
         mkdir -p "${profile_dir}"
+        # World-writable so the non-root GuideLLM container can write /results.
+        # A missing target would be auto-created root-owned by Docker and the
+        # run would die with `PermissionError: /results/benchmarks.csv`.
+        chmod 777 "${profile_dir}" 2>/dev/null || true
 
         config_file="${CONFIGS_DIR}/guidellm_concurrent_${name}.yaml"
 

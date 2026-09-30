@@ -32,8 +32,11 @@ Options:
   -p, --prompt-tokens NUM     Synthetic prompt token count (default: 8192)
   -o, --output-tokens NUM     Synthetic output token count (default: 1024)
   -i, --image IMAGE           GuideLLM container image (default: ghcr.io/vllm-project/guidellm:latest)
-  -m, --models-dir DIR        Host directory with model weights (listed in serving_launch_info.txt;
-                              recorded as the tokenizer/model source for the report)
+  -m, --models-dir DIR        Host model directory (containing tokenizer files). Mounted :ro into the
+                               container and used as the offline tokenizer source — avoids the
+                               HuggingFace download that fails with Errno 101 on air-gapped hosts.
+                               Also listed in serving_launch_info.txt. Auto-detected from the
+                               serving container's model arg when omitted.
   --dry-run                   Print commands without executing
   -h, --help                  Show this help message
 EOF
@@ -145,6 +148,11 @@ echo "============================================================"
 
 if [[ "$DRY_RUN" = false ]]; then
   mkdir -p "${TARGET_DIR}/profiles"
+  # Pre-create the bind-mount targets as the host user and make them
+  # world-writable. If a target is missing at `docker run` time, Docker
+  # auto-creates it root-owned and the non-root GuideLLM container (uid 1001)
+  # dies with `PermissionError: /results/benchmarks.csv`.
+  chmod 777 "${TARGET_DIR}" "${TARGET_DIR}/profiles" 2>/dev/null || true
 fi
 
 # 1. Inspect target model endpoint
@@ -230,6 +238,54 @@ ULIMITS:
   } >> "${TARGET_DIR}/serving_launch_info.txt"
 fi
 
+# Offline tokenizer: mount the host model dir and point GuideLLM at it so it
+# loads the tokenizer locally instead of downloading from HuggingFace. On an
+# air-gapped host that download fails during output finalization with
+# `httpx.ConnectError: [Errno 101] Network is unreachable` — csv/json still
+# land but html/png are lost. Loading the tokenizer from the mounted weights
+# avoids the network call entirely.
+EXTRA_VOLUMES=()
+TOKENIZER_ARGS=()
+if [[ -z "$MODELS_DIR" && -f "${TARGET_DIR}/serving_container_inspect.json" ]]; then
+  # Best-effort auto-detect of the host model dir from the serving container's
+  # model arg (`--model <path>` or `vllm serve <path>`), mapped through its mounts.
+  MODELS_DIR=$(python3 -c '
+import json, sys, os
+try:
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    cdata = data[0] if isinstance(data, list) else data
+    cmd = cdata.get("Config", {}).get("Cmd") or []
+    model_arg = ""
+    for i in range(len(cmd) - 1):
+        if cmd[i] == "--model":
+            model_arg = cmd[i+1]
+            break
+    if not model_arg:
+        for i, tok in enumerate(cmd):
+            if tok == "serve" and i + 1 < len(cmd):
+                model_arg = cmd[i+1]
+                break
+    if not model_arg:
+        sys.exit(0)
+    for m in (cdata.get("Mounts") or []):
+        dest, src = m.get("Destination", ""), m.get("Source", "")
+        if dest != "/" and model_arg.startswith(dest):
+            rel = os.path.relpath(model_arg, dest)
+            candidate = os.path.join(src, rel) if rel != "." else src
+            if os.path.exists(candidate):
+                print(candidate)
+                sys.exit(0)
+except Exception:
+    pass
+' "${TARGET_DIR}/serving_container_inspect.json" 2>/dev/null || true)
+  [[ -n "$MODELS_DIR" ]] && echo "Auto-detected host model directory: ${MODELS_DIR}"
+fi
+if [[ -n "$MODELS_DIR" && (-d "$MODELS_DIR" || "$DRY_RUN" = true) ]]; then
+  EXTRA_VOLUMES=("-v" "${MODELS_DIR}:/models:ro")
+  TOKENIZER_ARGS=(--tokenizer '{"kind":"huggingface_auto","model":"/models","load_kwargs":{"trust_remote_code":true}}')
+fi
+
 # 3. Define load profiles
 # All GuideLLM benchmark profiles:
 # - synchronous: sequential baseline
@@ -257,6 +313,7 @@ for profile in "${PROFILES[@]}"; do
   PROFILE_DIR="${TARGET_DIR}/profiles/${profile}"
   if [[ "$DRY_RUN" = false ]]; then
     mkdir -p "${PROFILE_DIR}"
+    chmod 777 "${PROFILE_DIR}" 2>/dev/null || true
   fi
 
   PROFILE_ARGS="${PROFILE_CONFIGS[$profile]}"
@@ -265,12 +322,14 @@ for profile in "${PROFILES[@]}"; do
     "$RUNTIME" run --rm
     --network host
     -v "${PROFILE_DIR}:/results:rw"
+    ${EXTRA_VOLUMES[@]+"${EXTRA_VOLUMES[@]}"}
     "$GUIDELLM_IMAGE"
     run
     --backend "kind=openai_http,target=${ENDPOINT}"
     --data "kind=synthetic_text,prompt_tokens=${PROMPT_TOKENS},output_tokens=${OUTPUT_TOKENS}"
     --constraint "kind=max_duration,seconds=${MAX_DURATION}"
     $PROFILE_ARGS
+    ${TOKENIZER_ARGS[@]+"${TOKENIZER_ARGS[@]}"}
     --output "kind=csv,path=/results/benchmarks.csv"
     --output "kind=json,path=/results/benchmarks.json"
     --output "kind=html,path=/results/benchmarks.html"

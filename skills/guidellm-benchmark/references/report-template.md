@@ -14,6 +14,8 @@ What the report **must** contain:
 4. How-to-read notes (completion vs errored vs incomplete).
 5. **Allowed exception**: a small hand-curated aggregate table (peak tok/s / saturation per workload, per-run completion summary) appended after the run — that is the conclusion of the analysis, not raw data.
 
+**Artifact availability**: `csv` and `json` are the source of truth and always land. `html` and `png` are best-effort — on an air-gapped host the tokenizer download can fail during output finalization (`httpx.ConnectError: [Errno 101] Network is unreachable`) and those two files are silently missing. The scripts prevent this by loading the tokenizer from the mounted model dir (see SKILL.md gotchas); if a link 404s, note it in the incident log and rely on `csv`/`json`.
+
 ---
 
 ## Launch-metadata inspect template

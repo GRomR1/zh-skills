@@ -129,17 +129,20 @@ docker inspect <serving_container> > "${RUN_DIR}/serving_container_inspect.json"
 
 ### 2. Run GuideLLM once per profile
 
-The image entrypoint is `guidellm`, so the container command **must** start with `run`:
+The image entrypoint is `guidellm`, so the container command **must** start with `run`. Pre-create the profile dir world-writable (Docker would otherwise auto-create it root-owned → `PermissionError`), and mount the model dir as the offline tokenizer source (avoids the HuggingFace download that fails with Errno 101 on air-gapped hosts):
 
 ```bash
+mkdir -p "$(pwd)/${RUN_DIR}/profiles/concurrent" && chmod 777 "$(pwd)/${RUN_DIR}/profiles/concurrent"
 docker run --rm --network host \
   -v "$(pwd)/${RUN_DIR}/profiles/concurrent:/results:rw" \
+  -v "$MODELS:/models:ro" \
   ghcr.io/vllm-project/guidellm:latest \
   run \
   --backend kind=openai_http,target=http://localhost:8000 \
   --data kind=synthetic_text,prompt_tokens=8192,output_tokens=1024 \
   --constraint kind=max_duration,seconds=600 \
   --profile kind=concurrent,streams=16,rampup_duration=10 \
+  --tokenizer '{"kind":"huggingface_auto","model":"/models","load_kwargs":{"trust_remote_code":true}}' \
   --output kind=csv,path=/results/benchmarks.csv \
   --output kind=json,path=/results/benchmarks.json \
   --output kind=html,path=/results/benchmarks.html \
@@ -204,6 +207,8 @@ When reporting to the user: summary of environment + paths to `REPORT.md` + at m
 7. **`mx-smi` telemetry**: `mx-smi -t` cannot be combined with `-o file` — the script polls with `-l 1000` and is stopped by `kill <pid>`; only one collector per `guidellm_gputelemetry/metrics.csv` (re-run mode reuses a live collector instead of starting a second writer).
 8. **YAML configs are regenerated** at every sweep invocation (stale `guidellm_concurrent_*.yaml` cleaned first) — edits to them do not survive a re-run; change `YAML_MAP`/`DURATION_MAP` in the script instead.
 9. **GuideLLM needs no GPU**: weights are mounted `:ro`, the profile dir `:rw` — nothing else. It only talks HTTP to the endpoint, so no `/dev/*` or `shm_size` tuning applies to the benchmark container (those matter only for the serving side, see repo compose files for MetaX).
+10. **`/results` must be pre-created and world-writable** — both scripts `mkdir -p` the profile dir and `chmod 777` it before `docker run`. If the bind-mount target is missing at run time, Docker auto-creates it **root-owned** and the non-root GuideLLM container (uid 1001) dies with `PermissionError: /results/benchmarks.csv`.
+11. **Offline tokenizer (air-gapped hosts)** — GuideLLM loads its tokenizer from HuggingFace unless told otherwise; with no external network that download fails during output finalization with `httpx.ConnectError: [Errno 101] Network is unreachable`, so `csv`/`json` land but `html`/`png` are lost. Both scripts avoid it: the sweep mounts `HOST_MODELS_DIR` and sets `tokenizer: huggingface_auto` in the YAML; `run_benchmarks.sh` mounts `--models-dir` (auto-detected from the serving container's model arg when omitted) and passes `--tokenizer '{"kind":"huggingface_auto","model":"/models",...}'`. Treat `html`/`png` as best-effort — `csv`/`json` are the source of truth.
 
 ---
 
