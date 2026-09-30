@@ -6,7 +6,7 @@ Agent skills repository compatible with [GitHub CLI Agent Skills (`gh skill`)](h
 
 Skills are organized according to standard Agent Skills conventions under the `skills/` directory:
 
-```
+```text
 zh-skills/
 ├── .github/
 │   └── workflows/
@@ -24,11 +24,11 @@ zh-skills/
 
 ## Available Skills
 
-| Skill | Description |
-|---|---|
-| [`asllm-nerdctl`](skills/asllm-nerdctl/SKILL.md) | Deploy, manage, and query LLM models in nerdctl containers using asllm images on Alibaba 890P (AliXPU) hardware. |
+| Skill                                                        | Description                                                                                                         |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| [`asllm-nerdctl`](skills/asllm-nerdctl/SKILL.md)             | Deploy, manage, and query LLM models in nerdctl containers using asllm images on Alibaba 890P (AliXPU) hardware.    |
 | [`modelscope-download`](skills/modelscope-download/SKILL.md) | Download open-source LLM weights from ModelScope using modelscope CLI inside an asllm container with proxy support. |
-| [`guidellm-benchmark`](skills/guidellm-benchmark/SKILL.md) | Run GuideLLM load benchmarks across all profiles in nerdctl/docker containers and generate environment reports. |
+| [`guidellm-benchmark`](skills/guidellm-benchmark/SKILL.md)   | Run GuideLLM load benchmarks across all profiles in nerdctl/docker containers and generate environment reports.     |
 
 ---
 
@@ -44,6 +44,7 @@ gh --version
 
 #### From a remote GitHub repository
 
+```bash
 # Install a specific skill for GitHub Copilot (default)
 gh skill install GRomR1/zh-skills asllm-nerdctl
 
@@ -74,6 +75,7 @@ gh skill install . --all --from-local
 
 Preview a skill's file tree and rendered `SKILL.md` directly in the terminal without installing:
 
+```bash
 gh skill preview GRomR1/zh-skills asllm-nerdctl
 ```
 
@@ -98,11 +100,13 @@ gh skill update asllm-nerdctl
 ## Adding a New Skill
 
 1. Create a new directory under `skills/`:
+
    ```bash
    mkdir -p skills/my-new-skill
    ```
 
 2. Create `skills/my-new-skill/SKILL.md` with required frontmatter:
+
    ```markdown
    ---
    name: my-new-skill
@@ -144,16 +148,19 @@ gh skill publish --fix
 ### Publish to GitHub
 
 1. Ensure the repository has a GitHub remote:
+
    ```bash
    gh repo create zh-skills --public --source=. --push
    ```
 
 2. Add the `agent-skills` topic to the repository (makes it discoverable via `gh skill search`):
+
    ```bash
    gh repo edit --add-topic agent-skills
    ```
 
 3. Publish a release:
+
    ```bash
    # Interactive publish
    gh skill publish
