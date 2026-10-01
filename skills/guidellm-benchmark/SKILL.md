@@ -105,7 +105,7 @@ Right after the run directory is created (before any benchmark), and **before** 
 | `serving_launch_info.txt` | `IMAGE`, `ENTRYPOINT`, `CMD` (full server args), `MOUNTS`, `DEVICES`, `PORTS`, `ENV`, `GROUP_ADD`, `SECURITY_OPT`, `ULIMITS`, `CAP_ADD`, then `=== MODEL CHECK ===` listing the host model dir (weights/tokenizer source) |
 | `serving_container_inspect.json` | Verbatim full output of `<runtime> inspect <container>` — the ground truth if the template misses a field |
 | `REPORT.md` | Environment summary (model id, image, server args, durations, runtime) + relative links to metadata, artifacts and telemetry — never raw metric dumps |
-| `guidellm_gputelemetry/metrics.csv` | (sweep only) `mx-smi` at 1 Hz: memory, utilization, temperature, power, for the whole sweep |
+| `metrics.csv` | (sweep only) `mx-smi` at 1 Hz: memory, utilization, temperature, power, for the whole sweep — written into the run dir next to `REPORT.md` |
 
 Capturing launch info up-front matters for two reasons: a sweep can die hours in (took down a prior run via SIGHUP), and identical model weights served with different `max-num-seqs` / `--no-enable-prefix-caching` / quant flags produce completely different curves. The launch template is defined verbatim in `references/report-template.md`.
 
@@ -185,7 +185,7 @@ Parse `benchmarks.json` per profile (keys: `metrics.request_totals`, `requests_p
   - Re-run mode uses exactly this: `errored == 0 && completion >= 0.90` → profile is "already good" and skipped.
 - **Saturation point** = first stream step where median TTFT jumps past ~10 s (pre-queued requests dominate).
 - **Single-stream rows** baseline decode: median TPOT ≈ per-token latency; output tok/s ≈ `output_tokens / TPOT`.
-- **GPU correlation**: overlay `guidellm_gputelemetry/metrics.csv` (1 Hz) on the timeline of a run to see utilization/memory/power at saturation.
+- **GPU correlation**: overlay `metrics.csv` (1 Hz, in the run dir) on the timeline of a run to see utilization/memory/power at saturation.
 - Worked example with full tables — peaks, saturation points, per-run rows and the incidents log of the `guidellm_sweep_20260924_223015` run (Qwen3.8-27B-W8A8, 28 runs, 0 errors): [references/example-sweep-qwen38-27b.md](references/example-sweep-qwen38-27b.md).
 
 ---
@@ -204,7 +204,7 @@ When reporting to the user: summary of environment + paths to `REPORT.md` + at m
 4. **Long sweeps die with the terminal**: launch with `setsid ... </dev/null >log 2>&1 &` (SIGHUP hit a previous run and killed the orchestrator silently).
 5. **Resume, don't restart**: `SWEEP_RUN_DIR=<existing dir>` re-runs only failed/incomplete profiles — healthy 28-run sweeps re-check in seconds.
 6. **The server can die mid-sweep** (engine crash, GPU driver wedging — e.g. MetaX ringbuf exhaustion leaves a zombie worker when the container has no `--init`). The orchestrator only probes `/v1/models` between runs; it will not resurrect the container. Recovery: fix/recreate the serving container (prefer `--init` so workers get reaped), then resume with `SWEEP_RUN_DIR`. Record what happened as an incident note appended to `REPORT.md`.
-7. **`mx-smi` telemetry**: `mx-smi -t` cannot be combined with `-o file` — the script polls with `-l 1000` and is stopped by `kill <pid>`; only one collector per `guidellm_gputelemetry/metrics.csv` (re-run mode reuses a live collector instead of starting a second writer).
+7. **`mx-smi` telemetry**: `mx-smi -t` cannot be combined with `-o file` — the script polls with `-l 1000` and is stopped by `kill <pid>`; only one collector per `metrics.csv` (re-run mode reuses a live collector instead of starting a second writer).
 8. **YAML configs are regenerated** at every sweep invocation (stale `guidellm_concurrent_*.yaml` cleaned first) — edits to them do not survive a re-run; change `YAML_MAP`/`DURATION_MAP` in the script instead.
 9. **GuideLLM needs no GPU**: weights are mounted `:ro`, the profile dir `:rw` — nothing else. It only talks HTTP to the endpoint, so no `/dev/*` or `shm_size` tuning applies to the benchmark container (those matter only for the serving side, see repo compose files for MetaX).
 10. **`/results` must be pre-created and world-writable** — both scripts `mkdir -p` the profile dir and `chmod 777` it before `docker run`. If the bind-mount target is missing at run time, Docker auto-creates it **root-owned** and the non-root GuideLLM container (uid 1001) dies with `PermissionError: /results/benchmarks.csv`.

@@ -88,7 +88,7 @@ and were skipped when windows were later lengthened.
 
 - [profiles/](../../../../guidellm_sweep_20260924_223015/profiles/) — 28 directories with `benchmarks.{csv,json,html,png}`
 - [REPORT.md](../../../../guidellm_sweep_20260924_223015/REPORT.md) — the run's own report
-- `mx-smi` CSV: [guidellm_gputelemetry/metrics.csv](../../../../guidellm_gputelemetry/metrics.csv) (1 Hz: memory, utilization, temperature, power)
+- `mx-smi` CSV: [metrics.csv](../../../../guidellm_sweep_20260924_223015/metrics.csv) (1 Hz: memory, utilization, temperature, power — written into the run dir next to REPORT.md)
 
 ## Incidents during the sweep (append lessons like these to REPORT.md)
 

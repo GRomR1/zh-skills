@@ -16,7 +16,7 @@
 #
 # Overridable via env (defaults = current production layout):
 #   SERVING_CONTAINER RUNTIME ENDPOINT GUIDELLM_IMAGE HOST_MODELS_DIR
-#   CONFIGS_DIR GPU_TELEMETRY_DIR TOKENIZER_MODEL SWEEP_STREAMS
+#   CONFIGS_DIR TOKENIZER_MODEL SWEEP_STREAMS
 #
 
 set -euo pipefail
@@ -27,7 +27,6 @@ GUIDELLM_IMAGE="${GUIDELLM_IMAGE:-ghcr.io/vllm-project/guidellm:latest}"
 ENDPOINT="${ENDPOINT:-http://localhost:8000}"
 HOST_MODELS_DIR="${HOST_MODELS_DIR:-/home/rgainanov/metax-vllm/models}"
 CONFIGS_DIR="${CONFIGS_DIR:-/home/rgainanov/metax-vllm/configs}"
-GPU_TELEMETRY_DIR="${GPU_TELEMETRY_DIR:-/home/rgainanov/metax-vllm/guidellm_gputelemetry}"
 TOKENIZER_MODEL="${TOKENIZER_MODEL:-/models/metax-tech/Qwen3.8-27B-W8A8}"
 STREAM_VALUES=(1 4 8 16 32 64 128)  # 128 added, matching max_num_seqs=128
 if [ -n "${SWEEP_STREAMS:-}" ]; then
@@ -108,7 +107,6 @@ else
     RUN_DIR="${BASE_DIR}/guidellm_sweep_${TIMESTAMP}"
 fi
 mkdir -p "${RUN_DIR}"
-mkdir -p "${GPU_TELEMETRY_DIR}"
 
 echo "============================================================"
 echo "Complete Sweep Orchestration V2 — Qwen3.8-27B"
@@ -119,26 +117,25 @@ echo "Container Runtime:  ${RUNTIME}"
 echo "Profiles:           ${#YAML_MAP[@]} workloads × ${#STREAM_VALUES[@]} stream steps = $((${#YAML_MAP[@]} * ${#STREAM_VALUES[@]})) runs"
 echo "============================================================"
 
-# Start GPU telemetry (run on host: mx-smi writes directly to the host dir;
-# note that mx-smi forbids -t when writing to a file, so we loop until killed).
-# Only start a new telemetry session for a fresh run; in re-run mode an
-# existing session (or an existing CSV) is left untouched.
+# Start GPU telemetry (run on host: mx-smi writes directly into the run dir,
+# next to REPORT.md; note that mx-smi forbids -t when writing to a file, so we
+# loop until killed). Only start a new telemetry session for a fresh run; in
+# re-run mode an existing session (or an existing CSV) is left untouched.
 echo "Starting mx-smi telemetry in background on host..."
-mkdir -p "${GPU_TELEMETRY_DIR}"
 if [ -n "${SWEEP_RUN_DIR:-}" ]; then
     if pgrep -f "mx-smi -l 1000" >/dev/null 2>&1; then
         echo "Telemetry already running, reusing it."
         TELEMETRY_PID="$(pgrep -f 'mx-smi -l 1000' | head -1)"
     else
-        rm -f "${GPU_TELEMETRY_DIR}/metrics.csv"
-        mx-smi -l 1000 -o "${GPU_TELEMETRY_DIR}/metrics.csv" \
+        rm -f "${RUN_DIR}/metrics.csv"
+        mx-smi -l 1000 -o "${RUN_DIR}/metrics.csv" \
             --show-memory --show-usage --show-temperature --show-pmbus-power \
             > "${RUN_DIR}/telemetry_start.log" 2>&1 &
         TELEMETRY_PID=$!
     fi
 else
-    rm -f "${GPU_TELEMETRY_DIR}/metrics.csv"
-    mx-smi -l 1000 -o "${GPU_TELEMETRY_DIR}/metrics.csv" \
+    rm -f "${RUN_DIR}/metrics.csv"
+    mx-smi -l 1000 -o "${RUN_DIR}/metrics.csv" \
         --show-memory --show-usage --show-temperature --show-pmbus-power \
         > "${RUN_DIR}/telemetry_start.log" 2>&1 &
     TELEMETRY_PID=$!
@@ -288,7 +285,6 @@ PYEOF
             -v "${HOST_MODELS_DIR}:/models:ro"
             -v "${config_file}:/tmp/${name}.yaml:ro"
             -v "${profile_dir}:/results:rw"
-            -v "${GPU_TELEMETRY_DIR}:/gpu_metrics:rw"
             "$GUIDELLM_IMAGE"
             run --config /tmp/${name}.yaml
             --profile 'kind=concurrent,streams='"${stream}"
@@ -366,7 +362,7 @@ sleep 3
     echo
     echo "## GPU telemetry"
     echo
-    echo "- \`mx-smi\` CSV: [\`metrics.csv\`](../guidellm_gputelemetry/metrics.csv)"
+    echo "- \`mx-smi\` CSV: [\`metrics.csv\`](metrics.csv)"
     echo "  (1 Hz sampling: memory, utilization, temperature, power)"
     echo
     echo "---"
